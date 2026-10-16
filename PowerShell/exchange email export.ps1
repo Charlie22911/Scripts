@@ -1,506 +1,469 @@
 <#
-KEYWORD EMAIL COLLECTION AND PST EXPORT
-ON-PREMISES EXCHANGE MANAGEMENT SHELL
+.EXAMPLE
+    .\exchange_mailbox_keyword_export_menu_v2.ps1
 
-Searches designated mailboxes for keyword-responsive messages, copies
-matching items to a Discovery Mailbox, and exports selected collection
-folders, including their descendants, to a PST.
+.DESCRIPTION
+    Interactive keyword search and PST export for on-premises Exchange.
+    Run in the Exchange Management Shell using Windows PowerShell.
 
-Requires Exchange mailbox search and mailbox import/export permissions.
-The Exchange Trusted Subsystem requires write access to the PST UNC share.
-Run in the Exchange Management Shell on an authorized administrative host.
+    1. Search mailboxes, estimate results, copy to a Discovery Mailbox,
+       and export the collection to PST.
+    2. Export an existing collection without repeating the search.
+    3. Inspect an existing collection.
 
-Menu:
-  1. Estimate, collect, and export
-  2. Export an existing collection
-  3. Inspect collection folders
-  Q. Quit
+    Search terms separated by commas are treated as exact phrases.
+    ANY matches at least one phrase; ALL requires every phrase.
+    Source mailbox contents are not changed or deleted.
 
-Source mailboxes are never modified or deleted by this script.
+.NOTES
+    Requires Discovery Management and Mailbox Import Export permissions.
+    Exchange Trusted Subsystem needs read/write permission on the PST
+    destination's UNC share and underlying folder.
+    Search-Mailbox returns at most 10,000 matches per source mailbox.
 #>
 
-# =====================================================================
-# CONFIGURATION
-# =====================================================================
+$ErrorActionPreference = 'Stop'
+$MaxResultsPerMailbox = 10000
+$PollSeconds = 15
+$script:DiscoveryMailbox = ''
+$script:ExportDirectory = ''
 
-$CollectionId = "KEYWORD_COLLECTION_YYYYMMDD_R1"
-$TargetDiscoveryMailbox = "DiscoveryMailbox@contoso.mil"
-$PstExportDirectory = "\\FILESERVER\RestrictedShare\ApprovedCaseFolder"
+function Section {
+    param([string]$Heading)
+    Write-Host ''
+    Write-Host ('=' * 66) -ForegroundColor Cyan
+    Write-Host $Heading -ForegroundColor Cyan
+    Write-Host ('=' * 66) -ForegroundColor Cyan
+}
 
-$SourceMailboxes = @(
-    "custodian1@contoso.mil",
-    "custodian2@contoso.mil",
-    "custodian3@contoso.mil"
-)
+function Prompt-Text {
+    param([string]$Label, [string]$Default = '')
+    do {
+        if ($Default) {
+            $Answer = Read-Host "$Label [$Default]"
+            if ([string]::IsNullOrWhiteSpace($Answer)) { $Answer = $Default }
+        } else {
+            $Answer = Read-Host $Label
+        }
+        $Answer = $Answer.Trim()
+        if ($Answer) { return $Answer }
+        Write-Host 'A value is required.' -ForegroundColor Yellow
+    } while ($true)
+}
 
-$StartDateText = "01/01/2026"
-$EndDateText   = "12/31/2026"
+function Prompt-Confirm {
+    param([string]$Question, [string]$RequiredText)
+    Write-Host ''
+    Write-Host $Question -ForegroundColor Yellow
+    Write-Host "Type $RequiredText to continue. Press Enter to cancel." -ForegroundColor Yellow
+    return ((Read-Host 'Confirmation') -ceq $RequiredText)
+}
 
-$KeywordPhrases = @(
-    "KEYWORD PHRASE ONE",
-    "KEYWORD PHRASE TWO",
-    "KEYWORD PHRASE THREE",
-    "KEYWORD PHRASE FOUR"
-)
-
-$MaximumItemsPerMailbox = 10000
-$ExportPollingIntervalSeconds = 20
-$FolderStatisticsRetryCount = 6
-$FolderStatisticsRetrySeconds = 5
-
-# =====================================================================
-# SETTINGS
-# =====================================================================
-
-$ErrorActionPreference = "Stop"
-
-$FolderMap = @(
-    foreach ($SourceMailbox in $SourceMailboxes) {
-        [PSCustomObject]@{
-            SourceMailbox = $SourceMailbox
-            TargetFolder  = "$CollectionId - $SourceMailbox"
+function Parse-CommaList {
+    param([string]$Text)
+    $Seen = @{}
+    $Result = @()
+    foreach ($Part in ($Text -split ',')) {
+        $Item = $Part.Trim().Trim('"').Trim()
+        if ($Item -and -not $Seen.ContainsKey($Item.ToLowerInvariant())) {
+            $Result += $Item
+            $Seen[$Item.ToLowerInvariant()] = $true
         }
     }
-)
-
-$KeywordQuery = ($KeywordPhrases | ForEach-Object { '"' + $_ + '"' }) -join " OR "
-$SearchQuery = @"
-(
-    (sent:$StartDateText..$EndDateText) OR
-    (received:$StartDateText..$EndDateText)
-)
-AND
-(
-    $KeywordQuery
-)
-"@ -replace "(`r`n|`n|`r)", " "
-
-# =====================================================================
-# FUNCTIONS
-# =====================================================================
-
-function Write-Section {
-    param([string]$Title)
-    Write-Host ""
-    Write-Host "================================================================" -ForegroundColor Cyan
-    Write-Host $Title -ForegroundColor Cyan
-    Write-Host "================================================================" -ForegroundColor Cyan
+    return $Result
 }
 
-function Confirm-Action {
-    param(
-        [string]$Message,
-        [string]$Confirmation
-    )
-
-    Write-Host ""
-    Write-Host $Message -ForegroundColor Yellow
-    Write-Host "Type exactly $Confirmation to proceed, or press Enter to cancel." -ForegroundColor Yellow
-    return ((Read-Host "Confirmation") -ceq $Confirmation)
+function Read-CommaList {
+    param([string]$Label)
+    do {
+        Write-Host ''
+        $Raw = Prompt-Text $Label
+        $Items = @(Parse-CommaList -Text $Raw)
+        if ($Items.Count -gt 0) { return $Items }
+        Write-Host 'Enter one or more values separated by commas.' -ForegroundColor Yellow
+    } while ($true)
 }
 
-function Test-RequiredCmdlets {
-    param([bool]$NeedSearch)
-
-    $Names = @(
-        "Get-Mailbox",
-        "Get-MailboxFolderStatistics",
-        "New-MailboxExportRequest",
-        "Get-MailboxExportRequestStatistics"
-    )
-
-    if ($NeedSearch) {
-        $Names += "Search-Mailbox"
-    }
-
-    $Missing = @($Names | Where-Object { -not (Get-Command -Name $_ -ErrorAction SilentlyContinue) })
-    if ($Missing.Count -gt 0) {
-        throw "Required Exchange cmdlets unavailable: $($Missing -join ', ')"
-    }
+function Read-CollectionId {
+    param([bool]$NewCollection)
+    $Default = ''
+    if ($NewCollection) { $Default = 'EMAIL_' + (Get-Date -Format 'yyyyMMdd_HHmmss') }
+    do {
+        $Id = Prompt-Text -Label 'Collection ID' -Default $Default
+        if ($Id -cmatch '^[a-zA-Z0-9_-]{1,55}$') { return $Id }
+        Write-Host 'Use 1 to 55 letters, numbers, underscores, or hyphens.' -ForegroundColor Yellow
+    } while ($true)
 }
 
-function Test-DiscoveryMailbox {
-    $Mailbox = Get-Mailbox -Identity $TargetDiscoveryMailbox -ErrorAction Stop
-    if ($Mailbox.RecipientTypeDetails -ne "DiscoveryMailbox") {
-        throw "Target $TargetDiscoveryMailbox is not a DiscoveryMailbox (type: $($Mailbox.RecipientTypeDetails))."
-    }
-    Write-Host "Discovery Mailbox: $($Mailbox.PrimarySmtpAddress)" -ForegroundColor Green
-}
-
-function Resolve-SourceMailboxes {
-    $Resolved = @()
-
-    foreach ($Entry in $FolderMap) {
-        $Mailbox = Get-Mailbox -Identity $Entry.SourceMailbox -ErrorAction Stop
-        if ($Mailbox.RecipientTypeDetails -notin @("UserMailbox", "SharedMailbox")) {
-            throw "Unsupported source mailbox type for $($Entry.SourceMailbox): $($Mailbox.RecipientTypeDetails)."
+function Read-DateRange {
+    Write-Host ''
+    Write-Host 'Optional date filter. Leave both dates empty to search all dates.'
+    Write-Host 'Dates use MM/DD/YYYY. Both sent and received dates are considered.'
+    do {
+        $Start = (Read-Host 'Start date (or Enter)').Trim()
+        $End   = (Read-Host 'End date (or Enter)').Trim()
+        if (-not $Start -and -not $End) { return $null }
+        $Culture = [System.Globalization.CultureInfo]::InvariantCulture
+        $Style = [System.Globalization.DateTimeStyles]::None
+        $StartDate = [datetime]::MinValue
+        $EndDate = [datetime]::MinValue
+        $OkStart = [datetime]::TryParseExact($Start, 'MM/dd/yyyy', $Culture, $Style, [ref]$StartDate)
+        $OkEnd   = [datetime]::TryParseExact($End,   'MM/dd/yyyy', $Culture, $Style, [ref]$EndDate)
+        if ($OkStart -and $OkEnd -and $StartDate -le $EndDate) {
+            return [PSCustomObject]@{ Start = $Start; End = $End }
         }
+        Write-Host 'Enter two valid MM/DD/YYYY dates, with the start on or before the end.' -ForegroundColor Yellow
+    } while ($true)
+}
 
-        $Resolved += [PSCustomObject]@{
-            SourceMailbox = [string]$Mailbox.PrimarySmtpAddress
-            TargetFolder  = $Entry.TargetFolder
-        }
+function Build-Query {
+    param([string[]]$Terms, [string]$Mode, $Dates)
+    $Parts = @()
+    foreach ($Term in $Terms) {
+        if ($Term.Contains('"')) { throw 'Search terms cannot contain double-quote characters.' }
+        $Parts += '"' + $Term + '"'
     }
-
-    return $Resolved
+    $Joiner = if ($Mode -eq 'ALL') { ' AND ' } else { ' OR ' }
+    $Query = '(' + ($Parts -join $Joiner) + ')'
+    if ($null -ne $Dates) {
+        $Query += ' AND ((sent:' + $Dates.Start + '..' + $Dates.End +
+                  ') OR (received:' + $Dates.Start + '..' + $Dates.End + '))'
+    }
+    return $Query
 }
 
-function Get-NormalizedFolderPath {
-    param([string]$Path)
-    return ('/' + $Path.Replace('\', '/').Trim('/'))
+function Require-Exchange {
+    param([bool]$SearchRequired)
+    $Commands = @('Get-Mailbox', 'Get-MailboxFolderStatistics')
+    if ($SearchRequired) { $Commands += 'Search-Mailbox' }
+    $Commands += 'New-MailboxExportRequest'
+    $Commands += 'Get-MailboxExportRequestStatistics'
+    $Missing = @($Commands | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) })
+    if ($Missing.Count) {
+        throw 'Exchange commands missing: ' + ($Missing -join ', ') + '. Run this script in the Exchange Management Shell with the required RBAC roles.'
+    }
 }
 
-function Get-CollectionSummary {
-    param([object[]]$ExpectedFolders)
-
-    $Statistics = @(Get-MailboxFolderStatistics -Identity $TargetDiscoveryMailbox -ErrorAction Stop)
-    $Summary = @()
-
-    foreach ($Entry in $ExpectedFolders) {
-        $Roots = @(
-            $Statistics | Where-Object {
-                $_.Name -eq $Entry.TargetFolder
+function Choose-DiscoveryMailbox {
+    Section 'DISCOVERY MAILBOX'
+    while ($true) {
+        $script:DiscoveryMailbox = Prompt-Text -Label 'Discovery Mailbox name or address' -Default $script:DiscoveryMailbox
+        try {
+            $Mailbox = Get-Mailbox -Identity $script:DiscoveryMailbox -ErrorAction Stop
+            if ([string]$Mailbox.RecipientTypeDetails -ne 'DiscoveryMailbox') {
+                Write-Host 'That mailbox is not a Discovery Mailbox.' -ForegroundColor Yellow
+                $script:DiscoveryMailbox = ''
+                continue
             }
-        )
-
-        if ($Roots.Count -gt 1) {
-            $TopRoots = @(
-                $Roots | Where-Object {
-                    (Get-NormalizedFolderPath ([string]$_.FolderPath)) -eq ("/" + $Entry.TargetFolder)
-                }
-            )
-            if ($TopRoots.Count -eq 1) {
-                $Roots = $TopRoots
-            }
+            $script:DiscoveryMailbox = [string]$Mailbox.PrimarySmtpAddress
+            Write-Host "Using: $script:DiscoveryMailbox" -ForegroundColor Green
+            return
         }
-
-        if ($Roots.Count -gt 1) {
-            throw "Multiple folders named '$($Entry.TargetFolder)' exist in the Discovery Mailbox. Inspect folder paths before exporting."
+        catch {
+            Write-Host "Mailbox could not be verified: $($_.Exception.Message)" -ForegroundColor Yellow
+            $script:DiscoveryMailbox = ''
         }
+    }
+}
 
-        if ($Roots.Count -eq 0) {
-            $Summary += [PSCustomObject]@{
-                SourceMailbox  = $Entry.SourceMailbox
-                TargetFolder   = $Entry.TargetFolder
-                FolderPath     = "(not found)"
-                RootItems      = 0
-                ChildItems     = 0
-                TotalItems     = 0
-                Exists         = $false
-            }
+function Choose-ExportDirectory {
+    Section 'PST DESTINATION'
+    Write-Host 'Use a UNC folder such as \\SERVER\PSTExports\CaseFolder.'
+    Write-Host 'Exchange Trusted Subsystem must have write access to the share.'
+    while ($true) {
+        $Candidate = Prompt-Text -Label 'Export folder (UNC)' -Default $script:ExportDirectory
+        if ($Candidate -notmatch '^\\\\[^\\]+\\[^\\]+') {
+            Write-Host 'Enter a UNC path beginning with \\SERVER\SHARE.' -ForegroundColor Yellow
+            $script:ExportDirectory = ''
             continue
         }
+        if (-not (Test-Path -LiteralPath $Candidate -PathType Container)) {
+            Write-Host 'That folder is not accessible from this session.' -ForegroundColor Yellow
+            $script:ExportDirectory = ''
+            continue
+        }
+        $script:ExportDirectory = $Candidate.TrimEnd('\')
+        return
+    }
+}
 
-        $Root = $Roots[0]
-        $RootPath = Get-NormalizedFolderPath ([string]$Root.FolderPath)
-        $Prefix = $RootPath + '/'
-        $Descendants = @(
-            $Statistics | Where-Object {
-                (Get-NormalizedFolderPath ([string]$_.FolderPath)).StartsWith(
-                    $Prefix,
-                    [System.StringComparison]::OrdinalIgnoreCase
-                )
+function Make-FolderMap {
+    param([string]$CollectionId, [string[]]$Mailboxes, [bool]$Resolve)
+    $Mapped = @()
+    $Seen = @{}
+    foreach ($Identity in $Mailboxes) {
+        $Address = $Identity
+        if ($Resolve) {
+            $Mailbox = Get-Mailbox -Identity $Identity -ErrorAction Stop
+            if ([string]$Mailbox.RecipientTypeDetails -notin @('UserMailbox', 'SharedMailbox')) {
+                throw "Source is not a user/shared mailbox: $Identity"
             }
-        )
-
-        $ChildItemCount = 0L
-        foreach ($Child in $Descendants) {
-            $ChildItemCount += [long]$Child.ItemsInFolder
+            $Address = [string]$Mailbox.PrimarySmtpAddress
         }
+        if ($Seen.ContainsKey($Address.ToLowerInvariant())) { continue }
+        $Seen[$Address.ToLowerInvariant()] = $true
+        $Mapped += [PSCustomObject]@{
+            Mailbox = $Address
+            Folder = "$CollectionId - $Address"
+        }
+    }
+    return $Mapped
+}
 
-        $RootCount = [long]$Root.ItemsInFolder
-
+function Get-CollectionFolders {
+    param([object[]]$Map)
+    $AllFolders = @(Get-MailboxFolderStatistics -Identity $script:DiscoveryMailbox -ErrorAction Stop)
+    $Summary = @()
+    foreach ($Entry in $Map) {
+        $Roots = @($AllFolders | Where-Object { $_.Name -eq $Entry.Folder })
+        if ($Roots.Count -gt 1) {
+            throw "More than one '$($Entry.Folder)' folder exists. Resolve the duplicate before exporting."
+        }
+        $Found = ($Roots.Count -eq 1)
+        $RootCount = 0L
+        $ChildCount = 0L
+        $Path = ''
+        if ($Found) {
+            $Root = $Roots[0]
+            $Path = ('/' + ([string]$Root.FolderPath).Replace('\', '/').Trim('/'))
+            $RootCount = [long]$Root.ItemsInFolder
+            $Prefix = $Path + '/'
+            foreach ($Folder in $AllFolders) {
+                $ChildPath = '/' + ([string]$Folder.FolderPath).Replace('\', '/').Trim('/')
+                if ($ChildPath.StartsWith($Prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $ChildCount += [long]$Folder.ItemsInFolder
+                }
+            }
+        }
         $Summary += [PSCustomObject]@{
-            SourceMailbox  = $Entry.SourceMailbox
-            TargetFolder   = $Entry.TargetFolder
-            FolderPath     = $RootPath
-            RootItems      = $RootCount
-            ChildItems     = $ChildItemCount
-            TotalItems     = ($RootCount + $ChildItemCount)
-            Exists         = $true
+            Mailbox = $Entry.Mailbox
+            Folder = $Entry.Folder
+            Found = $Found
+            RootItems = $RootCount
+            SubfolderItems = $ChildCount
+            TotalItems = $RootCount + $ChildCount
         }
     }
-
     return $Summary
 }
 
-function Show-CollectionSummary {
-    param([object[]]$ExpectedFolders)
-
-    $Summary = @(Get-CollectionSummary -ExpectedFolders $ExpectedFolders)
-    Write-Host ""
-    $Summary |
-        Select-Object SourceMailbox, TargetFolder, Exists, RootItems, ChildItems, TotalItems |
-        Format-Table -AutoSize | Out-Host
-
-    Write-Host "RootItems may include Exchange search-report messages." -ForegroundColor Yellow
-    Write-Host "ChildItems counts items within the collection folder's descendants." -ForegroundColor Yellow
-    return $Summary
-}
-
-function Assert-CollectionHasMessages {
-    param([object[]]$ExpectedFolders)
-
-    $Final = @()
-    for ($Attempt = 1; $Attempt -le $FolderStatisticsRetryCount; $Attempt++) {
-        $Final = @(Get-CollectionSummary -ExpectedFolders $ExpectedFolders)
-        $MissingFolders = @($Final | Where-Object { -not $_.Exists })
-        $EmptyChildren = @($Final | Where-Object { $_.Exists -and $_.ChildItems -le 0 })
-
-        if ($MissingFolders.Count -eq 0 -and $EmptyChildren.Count -eq 0) {
-            break
-        }
-
-        if ($Attempt -lt $FolderStatisticsRetryCount) {
-            Start-Sleep -Seconds $FolderStatisticsRetrySeconds
+function Export-Collection {
+    param([string]$CollectionId, [object[]]$Map, [bool]$AllowRootOnly)
+    Section 'VERIFY COLLECTION BEFORE EXPORT'
+    $Summary = @()
+    for ($Attempt = 1; $Attempt -le 4; $Attempt++) {
+        $Summary = @(Get-CollectionFolders -Map $Map)
+        $Missing = @($Summary | Where-Object { -not $_.Found })
+        $Empty = @($Summary | Where-Object { $_.TotalItems -le 0 })
+        if ($Missing.Count -eq 0 -and $Empty.Count -eq 0) { break }
+        if ($Attempt -lt 4) {
+            Write-Host 'Checking mailbox folder statistics again...' -ForegroundColor Yellow
+            Start-Sleep -Seconds 5
         }
     }
-
-    $Final |
-        Select-Object SourceMailbox, TargetFolder, Exists, RootItems, ChildItems, TotalItems |
-        Format-Table -AutoSize | Out-Host
-
-    $MissingFolders = @($Final | Where-Object { -not $_.Exists })
-    $EmptyChildren = @($Final | Where-Object { $_.Exists -and $_.ChildItems -le 0 })
-
-    if ($MissingFolders.Count -gt 0) {
-        throw "One or more expected collection folders are missing. No PST export was started."
+    $Summary | Format-Table -Property Mailbox, Found, RootItems, SubfolderItems, TotalItems -AutoSize | Out-Host
+    if (@($Summary | Where-Object { -not $_.Found }).Count) {
+        throw 'Expected collection folders are missing. Export cancelled.'
     }
-    if ($EmptyChildren.Count -gt 0) {
-        throw "One or more collection folders contain no items in subfolders. Only search-report messages may be present. Inspect the Discovery Mailbox before exporting."
+    if (@($Summary | Where-Object { $_.TotalItems -le 0 }).Count) {
+        throw 'One or more collection folders are empty. Export cancelled.'
+    }
+    if (-not $AllowRootOnly -and @($Summary | Where-Object { $_.SubfolderItems -eq 0 }).Count) {
+        throw 'An existing collection has no items in subfolders. It may contain only search-report messages. Inspect it before exporting.'
     }
 
-    return $Final
-}
+    Choose-ExportDirectory
+    $Stamp = Get-Date -Format 'yyyyMMdd_HHmmssfff'
+    $PstPath = Join-Path $script:ExportDirectory ("${CollectionId}_${Stamp}.pst")
+    $RequestName = "KeyExport_$Stamp"
+    if (Test-Path -LiteralPath $PstPath) { throw "PST already exists: $PstPath" }
 
-function Start-CollectionExport {
-    param(
-        [object[]]$ExpectedFolders,
-        [bool]$ExistingCollection
-    )
-
-    Write-Section "VALIDATE COLLECTION CONTENT"
-    $Validated = @(Assert-CollectionHasMessages -ExpectedFolders $ExpectedFolders)
-
-    if (-not (Test-Path -LiteralPath $PstExportDirectory -PathType Container)) {
-        throw "Export directory is unavailable: $PstExportDirectory"
-    }
-
-    if ($ExistingCollection) {
-        $Stamp = Get-Date -Format "yyyyMMdd_HHmmss"
-        $PstName = "${CollectionId}_Export_${Stamp}.pst"
-        $RequestName = "${CollectionId}_Export_${Stamp}"
-    }
-    else {
-        $PstName = "$CollectionId.pst"
-        $RequestName = "${CollectionId}_Export"
-    }
-
-    $PstFilePath = Join-Path $PstExportDirectory $PstName
-    if (Test-Path -LiteralPath $PstFilePath) {
-        throw "PST already exists; no files will be overwritten: $PstFilePath"
-    }
-
-    $ExportFolders = @(
-        $ExpectedFolders | ForEach-Object {
-            "$($_.TargetFolder)/*"
-        }
-    )
-
-    Write-Section "PST EXPORT SETTINGS"
-    Write-Host "Target mailbox: $TargetDiscoveryMailbox"
-    Write-Host "Destination:    $PstFilePath"
-    Write-Host "Folders and descendants:"
-    $ExportFolders | ForEach-Object { Write-Host "  $_" }
-
-    if (-not (Confirm-Action -Message "Export the identified collection content to the PST?" -Confirmation "EXPORT COLLECTION")) {
-        Write-Host "Export cancelled." -ForegroundColor Yellow
+    # The /* suffix includes the collection's folder hierarchy.
+    $FoldersToExport = @($Map | ForEach-Object { $_.Folder + '/*' })
+    Write-Host ''
+    Write-Host 'PST file:' -ForegroundColor Cyan
+    Write-Host $PstPath
+    Write-Host 'Collection folders:' -ForegroundColor Cyan
+    $FoldersToExport | ForEach-Object { Write-Host "  $_" }
+    if (-not (Prompt-Confirm -Question 'Export these folders to the new PST?' -RequiredText 'EXPORT')) {
+        Write-Host 'Export cancelled.' -ForegroundColor Yellow
         return
     }
 
-    Write-Section "CREATE PST EXPORT REQUEST"
+    Section 'EXPORT PROGRESS'
+    New-MailboxExportRequest -Name $RequestName -Mailbox $script:DiscoveryMailbox `
+        -FilePath $PstPath -IncludeFolders $FoldersToExport -ExcludeDumpster -ErrorAction Stop | Out-Null
 
-    # Exclude unrelated Recoverable Items from the Discovery Mailbox.
-    # Items already copied into collection folders remain in scope.
-    New-MailboxExportRequest `
-        -Name $RequestName `
-        -Mailbox $TargetDiscoveryMailbox `
-        -FilePath $PstFilePath `
-        -IncludeFolders $ExportFolders `
-        -ExcludeDumpster `
-        -ErrorAction Stop | Out-Null
-
-    $RequestIdentity = "$TargetDiscoveryMailbox\$RequestName"
-    $RunningStatuses = @("Queued", "InProgress", "CompletionInProgress")
-
-    Write-Section "MONITOR PST EXPORT"
-
+    $RequestId = "$($script:DiscoveryMailbox)\$RequestName"
     do {
-        Start-Sleep -Seconds $ExportPollingIntervalSeconds
+        Start-Sleep -Seconds $PollSeconds
+        $Stats = Get-MailboxExportRequestStatistics -Identity $RequestId -ErrorAction Stop
+        Write-Host ('Status: {0,-22} {1,3}%  Items: {2}' -f `
+            $Stats.Status, $Stats.PercentComplete, $Stats.ItemsTransferred)
+        $Status = [string]$Stats.Status
+    } while ($Status -in @('Queued', 'InProgress', 'CompletionInProgress'))
 
-        $Report = Get-MailboxExportRequestStatistics `
-            -Identity $RequestIdentity `
-            -IncludeReport `
-            -ErrorAction Stop
+    $Final = Get-MailboxExportRequestStatistics -Identity $RequestId -IncludeReport -ErrorAction Stop
+    Write-Host ''
+    $Final | Select-Object Status, PercentComplete, ItemsTransferred, BytesTransferred, Message, FailureCode |
+        Format-List | Out-Host
 
-        # Out-Host prevents formatting objects from corrupting the return value.
-        $Report |
-            Select-Object Status, PercentComplete, BytesTransferred, ItemsTransferred,
-                FailureCode, FailureSide, Message |
-            Format-List | Out-Host
-
-        $Status = [string]$Report.Status
+    if ([string]$Final.Status -ne 'Completed') {
+        throw 'Export did not complete successfully. Review the Exchange export report.'
     }
-    while ($Status -in $RunningStatuses)
-
-    if ($Status -ne "Completed") {
-        throw "PST export finished with status '$Status'. Review the report and do not use the PST as a complete collection."
+    $MinItems = [long](($Summary | Measure-Object -Property SubfolderItems -Sum).Sum)
+    if ([long]$Final.ItemsTransferred -lt $MinItems) {
+        Write-Host 'WARNING: Fewer items were transferred than counted in collection subfolders.' -ForegroundColor Red
+        Write-Host 'Check folder selection and the PST contents before using the export.' -ForegroundColor Red
+    } else {
+        Write-Host 'PST export completed. Verify messages inside Outlook.' -ForegroundColor Green
     }
-
-    $ExpectedChildItems = [long](($Validated | Measure-Object -Property ChildItems -Sum).Sum)
-    $TransferredItems = [long]$Report.ItemsTransferred
-    if ($TransferredItems -lt $ExpectedChildItems) {
-        throw "Export reported $TransferredItems transferred items, fewer than the $ExpectedChildItems items in collection subfolders. Verify the export report and PST contents."
-    }
-
-    Write-Host "PST export completed: $PstFilePath" -ForegroundColor Green
-    Write-Host "Transferred items: $TransferredItems" -ForegroundColor Green
-    Write-Host "Verify PST contents in Outlook before using or releasing the collection." -ForegroundColor Yellow
+    Write-Host "PST: $PstPath" -ForegroundColor Cyan
 }
 
-function Start-NewCollection {
-    Write-Section "SOURCE VALIDATION"
-    $Resolved = @(Resolve-SourceMailboxes)
-    $Resolved | Format-Table -AutoSize | Out-Host
-
-    $Existing = @(Get-CollectionSummary -ExpectedFolders $Resolved)
-    if (@($Existing | Where-Object { $_.Exists }).Count -gt 0) {
-        throw "Collection folders already exist. Use menu option 2 to export them, or use a new CollectionId for a new collection."
+function Start-NewSearch {
+    Require-Exchange -SearchRequired $true
+    Section 'NEW KEYWORD SEARCH'
+    $CollectionId = Read-CollectionId -NewCollection $true
+    $Mailboxes = @(Read-CommaList 'Mailbox addresses (comma separated)')
+    $Terms = @(Read-CommaList 'Search terms or phrases (comma separated)')
+    if (@($Terms | Where-Object { $_.Contains('"') }).Count) {
+        throw 'Do not place quotation marks inside search terms. Separate terms with commas.'
     }
 
-    Write-Section "SEARCH QUERY"
-    Write-Host $SearchQuery
+    Write-Host ''
+    Write-Host 'Search term matching:'
+    Write-Host '  [1] ANY term matches (OR, default)'
+    Write-Host '  [2] ALL terms must match (AND)'
+    do {
+        $Choice = (Read-Host 'Choose 1 or 2 [1]').Trim()
+        if ($Choice -in @('', '1', '2')) { break }
+        Write-Host 'Choose 1 or 2.' -ForegroundColor Yellow
+    } while ($true)
+    $Mode = if ($Choice -eq '2') { 'ALL' } else { 'ANY' }
+    $Dates = Read-DateRange
+    $Query = Build-Query -Terms $Terms -Mode $Mode -Dates $Dates
 
+    Choose-DiscoveryMailbox
+    $Map = @(Make-FolderMap -CollectionId $CollectionId -Mailboxes $Mailboxes -Resolve $true)
+    $Existing = @(Get-CollectionFolders -Map $Map)
+    if (@($Existing | Where-Object { $_.Found }).Count) {
+        throw 'Some collection folders already exist. Use another Collection ID or export the existing collection.'
+    }
+
+    Section 'REVIEW SEARCH'
+    Write-Host "Collection ID: $CollectionId"
+    Write-Host "Discovery Mailbox: $script:DiscoveryMailbox"
+    Write-Host "Term matching: $Mode"
+    Write-Host 'Source mailboxes:'
+    $Map | ForEach-Object { Write-Host "  $($_.Mailbox)" }
+    Write-Host 'Search terms:'
+    $Terms | ForEach-Object { Write-Host "  $_" }
+    Write-Host "Query: $Query"
+    if (-not (Prompt-Confirm -Question 'Estimate matching items in these mailboxes?' -RequiredText 'ESTIMATE')) { return }
+
+    Section 'ESTIMATING MATCHES'
     $Estimates = @()
-    foreach ($Entry in $Resolved) {
-        Write-Host "Estimating $($Entry.SourceMailbox)..." -ForegroundColor Yellow
-        $Result = Search-Mailbox `
-            -Identity $Entry.SourceMailbox `
-            -SearchQuery $SearchQuery `
-            -SearchDumpster `
-            -EstimateResultOnly `
-            -ErrorAction Stop
-
+    foreach ($Entry in $Map) {
+        Write-Host "Searching $($Entry.Mailbox)..." -ForegroundColor Yellow
+        $Estimate = Search-Mailbox -Identity $Entry.Mailbox -SearchQuery $Query `
+            -SearchDumpster -EstimateResultOnly -ErrorAction Stop
         $Estimates += [PSCustomObject]@{
-            SourceMailbox  = $Entry.SourceMailbox
-            TargetFolder   = $Entry.TargetFolder
-            EstimatedItems = [long]$Result.ResultItemsCount
-            EstimatedSize  = $Result.ResultItemsSize
+            Mailbox = $Entry.Mailbox
+            Folder = $Entry.Folder
+            Matches = [long]$Estimate.ResultItemsCount
+            Size = $Estimate.ResultItemsSize
         }
     }
-
-    Write-Section "ESTIMATED SEARCH RESULTS"
-    $Estimates | Format-Table -AutoSize | Out-Host
-
-    $OverLimit = @($Estimates | Where-Object { $_.EstimatedItems -ge $MaximumItemsPerMailbox })
-    if ($OverLimit.Count -gt 0) {
-        throw "At least one mailbox has 10,000 or more matches. Refine the collection scope before copying."
+    $Estimates | Select-Object Mailbox, Matches, Size | Format-Table -AutoSize | Out-Host
+    if (@($Estimates | Where-Object { $_.Matches -ge $MaxResultsPerMailbox }).Count) {
+        throw 'A mailbox has 10,000 or more matching items. Narrow the search before collecting.'
     }
-
-    $Active = @($Estimates | Where-Object { $_.EstimatedItems -gt 0 })
-    if ($Active.Count -eq 0) {
-        Write-Host "No responsive items were found." -ForegroundColor Yellow
+    $Active = @($Estimates | Where-Object { $_.Matches -gt 0 })
+    if (-not $Active.Count) {
+        Write-Host 'No matching items found. Nothing copied or exported.' -ForegroundColor Yellow
         return
     }
+    Write-Host ('Total estimated matches: {0}' -f (($Active | Measure-Object Matches -Sum).Sum)) -ForegroundColor Green
+    if (-not (Prompt-Confirm -Question 'Copy matching items into the Discovery Mailbox?' -RequiredText 'COPY')) { return }
 
-    if (-not (Confirm-Action -Message "Copy matching items into the Discovery Mailbox?" -Confirmation "COPY COLLECTION")) {
-        Write-Host "Collection cancelled." -ForegroundColor Yellow
-        return
-    }
-
-    Write-Section "COPY SEARCH RESULTS"
-    $CopyResults = @()
+    Section 'COPY MATCHING MESSAGES'
+    $Completed = @()
     foreach ($Entry in $Active) {
-        Write-Host "Copying $($Entry.SourceMailbox)..." -ForegroundColor Yellow
-        $Copy = Search-Mailbox `
-            -Identity $Entry.SourceMailbox `
-            -SearchQuery $SearchQuery `
-            -SearchDumpster `
-            -TargetMailbox $TargetDiscoveryMailbox `
-            -TargetFolder $Entry.TargetFolder `
-            -LogLevel Basic `
-            -ErrorAction Stop
-
-        $CopyResults += [PSCustomObject]@{
-            SourceMailbox = $Entry.SourceMailbox
-            TargetFolder  = $Entry.TargetFolder
-            CopiedItems   = [long]$Copy.ResultItemsCount
-            CopiedSize    = $Copy.ResultItemsSize
+        Write-Host "Copying $($Entry.Mailbox)..." -ForegroundColor Yellow
+        # Suppress prevents search-report messages being added to the collection.
+        $Copy = Search-Mailbox -Identity $Entry.Mailbox -SearchQuery $Query `
+            -SearchDumpster -TargetMailbox $script:DiscoveryMailbox `
+            -TargetFolder $Entry.Folder -LogLevel Suppress -ErrorAction Stop
+        $Count = [long]$Copy.ResultItemsCount
+        Write-Host "  Exchange reported $Count copied items."
+        if ($Count -le 0) {
+            throw "No items copied for $($Entry.Mailbox). The collected results remain in the Discovery Mailbox."
         }
+        $Completed += [PSCustomObject]@{ Mailbox = $Entry.Mailbox; Folder = $Entry.Folder }
     }
 
-    $CopyResults | Format-Table -AutoSize | Out-Host
-    if (@($CopyResults | Where-Object { $_.CopiedItems -le 0 }).Count -gt 0) {
-        throw "At least one mailbox reported zero copied items. PST export was not started."
+    Write-Host ''
+    Write-Host 'Collection copy finished.' -ForegroundColor Green
+    Write-Host "Save this collection ID to export again later: $CollectionId"
+    if ((Read-Host 'Export to PST now? (Y/n)').Trim() -notmatch '^[Nn]') {
+        Export-Collection -CollectionId $CollectionId -Map $Completed -AllowRootOnly $true
     }
+}
 
-    Start-CollectionExport -ExpectedFolders $Active -ExistingCollection $false
+function Start-ExistingCollection {
+    param([bool]$Export)
+    Require-Exchange -SearchRequired $false
+    Section 'EXISTING COLLECTION'
+    $CollectionId = Read-CollectionId -NewCollection $false
+    Write-Host 'Enter the same mailbox addresses used for the original collection.'
+    $Mailboxes = @(Read-CommaList 'Mailbox addresses (comma separated)')
+    Choose-DiscoveryMailbox
+    $Map = @(Make-FolderMap -CollectionId $CollectionId -Mailboxes $Mailboxes -Resolve $false)
+    Section 'COLLECTION CONTENTS'
+    $Summary = @(Get-CollectionFolders -Map $Map)
+    $Summary | Format-Table Mailbox, Found, RootItems, SubfolderItems, TotalItems -AutoSize | Out-Host
+    if (-not $Export) {
+        Write-Host 'RootItems may be search-report messages. SubfolderItems counts copied hierarchy contents.'
+        return
+    }
+    $Present = @($Map | Where-Object {
+        $FolderName = $_.Folder
+        @($Summary | Where-Object { $_.Folder -eq $FolderName -and $_.Found }).Count -gt 0
+    })
+    if (-not $Present.Count) { throw 'No matching collection folders were found.' }
+    if ($Present.Count -ne $Map.Count) {
+        Write-Host 'Only existing folders will be exported.' -ForegroundColor Yellow
+    }
+    Export-Collection -CollectionId $CollectionId -Map $Present -AllowRootOnly $false
 }
 
 # =====================================================================
-# MAIN
+# INTERACTIVE MENU
 # =====================================================================
 
-try {
-    Write-Section "KEYWORD EMAIL COLLECTION AND PST EXPORT"
-    Write-Host "Collection ID:     $CollectionId"
-    Write-Host "Discovery Mailbox: $TargetDiscoveryMailbox"
-    Write-Host "PST directory:     $PstExportDirectory"
-    Write-Host "Date range:        $StartDateText through $EndDateText"
-    Write-Host ""
-    Write-Host "[1] Estimate, collect, and export"
-    Write-Host "[2] Export existing collection folders"
-    Write-Host "[3] Inspect collection folders"
-    Write-Host "[Q] Quit"
-    $Choice = (Read-Host "Selection").Trim().ToUpperInvariant()
-
-    if ($Choice -eq "Q") { return }
-    if ($Choice -notin @("1", "2", "3")) {
-        throw "Invalid menu selection."
-    }
-
-    Test-RequiredCmdlets -NeedSearch ($Choice -eq "1")
-    Test-DiscoveryMailbox
-
-    if ($Choice -eq "1") {
-        Start-NewCollection
-    }
-    elseif ($Choice -eq "2") {
-        Write-Section "EXISTING COLLECTION"
-        $Current = @(Show-CollectionSummary -ExpectedFolders $FolderMap)
-        $Present = @($Current | Where-Object { $_.Exists })
-        $Missing = @($Current | Where-Object { -not $_.Exists })
-
-        if ($Present.Count -eq 0) {
-            throw "No configured collection folders were found in the Discovery Mailbox."
-        }
-        if ($Missing.Count -gt 0) {
-            Write-Host "Missing collection folders will not be exported:" -ForegroundColor Yellow
-            $Missing | ForEach-Object { Write-Host "  $($_.TargetFolder)" -ForegroundColor Yellow }
-        }
-
-        Start-CollectionExport -ExpectedFolders $Present -ExistingCollection $true
-    }
-    else {
-        Write-Section "COLLECTION FOLDER CONTENTS"
-        $Summary = @(Show-CollectionSummary -ExpectedFolders $FolderMap)
-        if (@($Summary | Where-Object { $_.Exists -and $_.ChildItems -gt 0 }).Count -eq 0) {
-            Write-Host "No copied messages were detected in collection subfolders." -ForegroundColor Yellow
+while ($true) {
+    Section 'EXCHANGE KEYWORD SEARCH AND PST EXPORT'
+    Write-Host '  [1] New search, copy results, and optionally export PST'
+    Write-Host '  [2] Export an existing collection to PST'
+    Write-Host '  [3] Inspect an existing collection'
+    Write-Host '  [Q] Quit'
+    Write-Host ''
+    $Selection = (Read-Host 'Select an option').Trim().ToUpperInvariant()
+    if ($Selection -eq 'Q') { break }
+    try {
+        switch ($Selection) {
+            '1' { Start-NewSearch }
+            '2' { Start-ExistingCollection -Export $true }
+            '3' { Start-ExistingCollection -Export $false }
+            default { Write-Host 'Select 1, 2, 3, or Q.' -ForegroundColor Yellow }
         }
     }
-}
-catch {
-    Write-Host ""
-    Write-Host "SCRIPT STOPPED" -ForegroundColor Red
-    Write-Host $_.Exception.Message -ForegroundColor Red
+    catch {
+        Write-Host ''
+        Write-Host "Stopped: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host 'Any messages already copied remain in the Discovery Mailbox.' -ForegroundColor Yellow
+    }
+    Write-Host ''
+    [void](Read-Host 'Press Enter to return to the menu')
 }
