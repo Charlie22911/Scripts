@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.14.1 — development build
+
+- Decoder startup failures identify the failed executable and preserve its exact exit code and available error text. Known Windows statuses receive a short explanation; an unknown failure is not labelled as an antivirus or policy block.
+- Startup records a bounded diagnostic in the instance-owned temporary directory, including the failed stage, Windows build, .NET release, CPU and memory context. The failure dialog and console show its location. This improves diagnosis without changing machine policy, dependency requirements or decoder resource limits.
+
 ## 0.14.0 — development build
 
 - Maintenance exports up to 200 selected retained Non-compliant/Evidence originals as an encrypted `.mcrevidence` package. Stored ciphertext and native/final-HTML authentication identities remain intact; capture details, thumbnails and record identifiers stay protected.

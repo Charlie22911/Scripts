@@ -1,6 +1,6 @@
 # File formats and previews
 
-Version 0.14.0 scans the following file types. A recognized extension means the file is eligible for discovery and a fingerprint. Quick and Deep scans sample files larger than 1 MiB; small files and previously full-hashed paths receive full SHA-256. A thumbnail or poster also requires a readable, valid file and a supported encoding within that container.
+Version 0.14.1 scans the following file types. A recognized extension means the file is eligible for discovery and a fingerprint. Quick and Deep scans sample files larger than 1 MiB; small files and previously full-hashed paths receive full SHA-256. A thumbnail or poster also requires a readable, valid file and a supported encoding within that container.
 
 | Family | Extensions | Saved gallery preview |
 | --- | --- | --- |

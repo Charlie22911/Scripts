@@ -16,6 +16,7 @@ namespace MediaReviewer {
         }
         void Run(string script,string directory,string manifest) {
             try {
+                StartupDiagnostics.EnvironmentDetails(directory);
                 var specs=new JavaScriptSerializer().Deserialize<AssetSpec[]>(manifest); var expected=specs.ToDictionary(s=>s.Name,StringComparer.Ordinal);
                 using(var reader=new StreamReader(script,Encoding.UTF8,true,65536)) {
                     string line; int completed=0;
@@ -24,6 +25,7 @@ namespace MediaReviewer {
                         string name=line.Substring(11); AssetSpec spec;
                         if(!expected.TryGetValue(name,out spec) || name!=Path.GetFileName(name) || name.IndexOfAny(Path.GetInvalidFileNameChars())>=0 || spec.Length<0 || spec.Length>128L*1024*1024) throw new InvalidDataException("Invalid embedded dependency manifest entry");
                         Stage="Extracting "+name+" ("+(completed+1)+"/"+specs.Length+")";
+                        StartupDiagnostics.Record(directory,Stage);
                         string compressed=Path.Combine(directory,name+".gzip"); bool ended=false; long encoded=0;
                         using(var output=File.Create(compressed)) {
                             while((line=reader.ReadLine())!=null) { if(line=="#MCR-END"){ended=true;break;} if(!line.StartsWith("#",StringComparison.Ordinal) || line.Length>32769)throw new InvalidDataException("Malformed embedded dependency payload");byte[] bytes=Convert.FromBase64String(line.Substring(1));encoded+=bytes.Length;if(encoded>128L*1024*1024)throw new InvalidDataException("Compressed dependency exceeds limit");output.Write(bytes,0,bytes.Length); }
@@ -45,12 +47,13 @@ namespace MediaReviewer {
                     }
                 }
                 if(expected.Count!=0)throw new InvalidDataException("Embedded dependencies are missing");
-                Stage="Loading verified x64 native libraries";Native.Initialize(directory);
+                Stage="Loading verified x64 native libraries";StartupDiagnostics.Record(directory,Stage);Native.Initialize(directory);
                 if(Native.SqliteVersion!="3.54.0" || Native.DecoderVersion!="8.18.7")throw new InvalidDataException("Unexpected native dependency version");
-                Stage="Checking isolated media helper and offline codecs";Preview.VerifyDecoder(directory);
-                Stage="Checking Windows authenticated encryption";Crypto.VerifyAvailable();
+                Stage="Checking isolated media helper and offline codecs";StartupDiagnostics.Record(directory,Stage);Preview.VerifyDecoder(directory);
+                Stage="Checking Windows authenticated encryption";StartupDiagnostics.Record(directory,Stage);Crypto.VerifyAvailable();
                 Stage="Ready";
-            } catch(Exception error) { Error=error.GetType().Name+": "+error.Message;Stage="Startup failed"; }
+                StartupDiagnostics.Record(directory,"Startup dependency checks completed.");
+            } catch(Exception error) { Error=StartupDiagnostics.Error(error);StartupDiagnostics.Record(directory,"Failed stage: "+Stage+Environment.NewLine+error);Stage="Startup failed"; }
             finally {Done=true;}
         }
     }

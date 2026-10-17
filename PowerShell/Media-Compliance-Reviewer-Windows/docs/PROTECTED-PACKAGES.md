@@ -18,7 +18,7 @@ Existing destinations are preserved. Cancellation and failure remove only an own
 Choose **Open** and select the `.mcrevidence` file, or start the portable script directly:
 
 ```powershell
-powershell.exe -NoProfile -STA -File .\Media-Compliance-Reviewer-Windows-0.14.0.ps1 -OpenEvidencePackage C:\Reviews\Evidence.mcrevidence
+powershell.exe -NoProfile -STA -File .\Media-Compliance-Reviewer-Windows-0.14.1.ps1 -OpenEvidencePackage C:\Reviews\Evidence.mcrevidence
 ```
 
 Enter the package's originals password. The application authenticates the complete package before showing its item list. Select an item to verify its original bytes and full SHA-256 before viewing its saved details and thumbnail. Larger or unavailable previews do not remove the verified original. Long saved details have a bounded display; the complete encrypted records remain in the package.

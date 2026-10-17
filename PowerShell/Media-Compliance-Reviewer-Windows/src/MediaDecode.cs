@@ -145,13 +145,14 @@ namespace MediaReviewer {
             return text.Append('\\',slashes*2).Append('"').ToString();
         }
         static byte[] Run(string executable,IEnumerable<string> arguments,int maxBytes){
-            var info=new ProcessStartInfo(Path.Combine(Native.RuntimeDirectory,executable),String.Join(" ",arguments.Select(Quote))) {UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true};
-            using(var process=Process.Start(info)){
+            var info=new ProcessStartInfo(Path.Combine(Native.RuntimeDirectory,executable),String.Join(" ",arguments.Select(Quote))) {UseShellExecute=false,CreateNoWindow=true,WorkingDirectory=Native.RuntimeDirectory,RedirectStandardOutput=true,RedirectStandardError=true};
+            Process child;try{child=Process.Start(info);}catch(System.ComponentModel.Win32Exception error){throw new System.ComponentModel.Win32Exception(error.NativeErrorCode,"Cannot start private "+executable+": "+error.Message+" (Win32 "+error.NativeErrorCode+")");}
+            using(var process=child){
                 Task<string> errors=Task.Run(()=>{var text=new StringBuilder();char[] block=new char[1024];int n;while((n=process.StandardError.Read(block,0,block.Length))>0){if(text.Length<8192)text.Append(block,0,Math.Min(n,8192-text.Length));}return text.ToString();});
                 byte[] result;
                 try{using(var output=new MemoryStream()){byte[] block=new byte[8192];int n;while((n=process.StandardOutput.BaseStream.Read(block,0,block.Length))>0){if(output.Length+n>maxBytes)throw new InvalidDataException("Decoder output exceeds its byte limit");output.Write(block,0,n);}result=output.ToArray();}}
                 catch{if(!process.HasExited)process.Kill();process.WaitForExit();errors.GetAwaiter().GetResult();throw;}
-                process.WaitForExit();string message=errors.GetAwaiter().GetResult();if(process.ExitCode!=0)throw new InvalidDataException("Video/HEIF preview unavailable: "+message.Trim());return result;
+                process.WaitForExit();string message=errors.GetAwaiter().GetResult();if(process.ExitCode!=0)throw new InvalidDataException(StartupDiagnostics.ProcessExit(executable,process.ExitCode,message));return result;
             }
         }
         static PreviewResult Video(string path,string ext,int side,int limit){

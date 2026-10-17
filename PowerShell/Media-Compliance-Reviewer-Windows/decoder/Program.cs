@@ -16,6 +16,6 @@ static class DecoderProgram {
                 catch(Exception error){var origin=error.GetBaseException();var native=origin as System.ComponentModel.Win32Exception;int code=native==null ? origin.HResult&65535 : native.NativeErrorCode;byte[] message=Encoding.UTF8.GetBytes("Preview "+Product.Version+" / libvips "+Native.DecoderVersion+" / "+error.GetType().Name+": "+error.Message);if(message.Length>16384)Array.Resize(ref message,16384);output.Write(1);output.Write(code);output.Write(message.Length);output.Write(message);}
                 output.Flush();
             }return 0;
-        }catch(Exception error){Console.Error.WriteLine(error.Message);return 1;}
+        }catch(Exception error){Console.Error.WriteLine(StartupDiagnostics.Error(error));return 1;}
     }
 }

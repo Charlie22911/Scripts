@@ -1,18 +1,20 @@
 # Media Compliance Reviewer for Windows
 
-I am building a portable PowerShell desktop reviewer for images and videos stored in Windows user home folders. Version **0.14.0** is a development build with a native WPF interface, one local SQLite database, saved previews, resumable scanning, review buckets, encrypted original retention, offline reports and protected Evidence packages.
+I am building a portable PowerShell desktop reviewer for images and videos stored in Windows user home folders. Version **0.14.1** is a development build with a native WPF interface, one local SQLite database, saved previews, resumable scanning, review buckets, encrypted original retention, offline reports and protected Evidence packages.
 
 ## Download and run
 
-Download [Media-Compliance-Reviewer-Windows-0.14.0.ps1](../Media-Compliance-Reviewer-Windows-0.14.0.ps1?raw=true). Use GitHub's **Download raw file** button if you open the file page. You need only this one script to run the application. Its [SHA-256 checksum](../Media-Compliance-Reviewer-Windows-0.14.0.ps1.sha256) is available beside it.
+Download [Media-Compliance-Reviewer-Windows-0.14.1.ps1](../Media-Compliance-Reviewer-Windows-0.14.1.ps1?raw=true). Use GitHub's **Download raw file** button if you open the file page. You need only this one script to run the application. Its [SHA-256 checksum](../Media-Compliance-Reviewer-Windows-0.14.1.ps1.sha256) is available beside it.
 
 Use 64-bit Windows PowerShell 5.1 on Windows 10 22H2 or later with the existing .NET Framework 4.6.2 or later. From the folder containing the downloaded script, run:
 
 ```powershell
-powershell.exe -NoProfile -STA -File .\Media-Compliance-Reviewer-Windows-0.14.0.ps1
+powershell.exe -NoProfile -STA -File .\Media-Compliance-Reviewer-Windows-0.14.1.ps1
 ```
 
 The application works offline. It includes SQLite, image/video decoders and its interface. It requires no installer, administrator rights, PowerShell 7, Python, Node.js, additional runtime or machine configuration changes. Embedded dependencies extract into an instance-owned folder under `%TEMP%\MediaComplianceReviewer`; their hashes and architecture are checked before use. Application-control restrictions can prevent execution; the application reports these restrictions without changing or bypassing policy.
+
+If startup fails, retain the program name, exact exit code and `startup.log` path shown by version 0.14.1. See [startup troubleshooting](docs/STARTUP.md). This diagnostic update preserves failure details; it does not establish the cause of an unmeasured target-machine failure or change dependency requirements.
 
 ## Start a review
 
@@ -52,8 +54,8 @@ The output is written to this folder's `dist/` directory. To use modified LGPL l
 
 ## Verification and current limits
 
-I verified this build with generated fixtures on one Windows machine, including the isolated portable script, real WPF interactions, final-HTML database/Evidence compatibility, cancellation, resume, malformed dependencies and protected package integrity. A generated original larger than 2 GiB retained, packaged and exported with its independently verified full SHA-256.
+I verified version 0.14.1 with isolated portable startup, a controlled silent media-tool failure, embedded WPF, decoder lifecycle and baseline format checks. Earlier generated checks cover database/Evidence compatibility, cancellation, resume and protected package integrity; the version 0.14.0 large-original measurement is recorded in current scope.
 
 Large network collections and multi-day operation remain unverified. ZIP scanning, broader maintenance and full playback remain outside this build's supported scope. Recognized extensions do not guarantee every encoding is decodable. See the [changelog](CHANGELOG.md) and [current scope](docs/STATUS.md) for details.
 
-Made by **IT1 Charlie McPherson** · Version **0.14.0** · **October 16, 2026**.
+Made by **IT1 Charlie McPherson** · Version **0.14.1** · **October 17, 2026**.

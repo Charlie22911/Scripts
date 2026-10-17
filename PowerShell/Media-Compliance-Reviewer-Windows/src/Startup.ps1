@@ -24,8 +24,13 @@ $instanceDirectory=Join-Path $applicationTempRoot ([Guid]::NewGuid().ToString('N
 [IO.Directory]::CreateDirectory($instanceDirectory) | Out-Null
 [IO.File]::WriteAllText((Join-Path $instanceDirectory 'owner.marker'),'MediaComplianceReviewer-owned-v1')
 $instanceLease=[IO.FileStream]::new((Join-Path $instanceDirectory 'instance.lease'),[IO.FileMode]::CreateNew,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+$startupDiagnosticPath=Join-Path $instanceDirectory 'startup.log'
+function Write-StartupDiagnostic([string]$Text){
+    try{if($Text.Length -gt 8192){$Text=$Text.Substring(0,8192)};$entry=[Text.Encoding]::UTF8.GetBytes(([DateTime]::UtcNow.ToString('o')+' '+$Text+[Environment]::NewLine));$log=[IO.FileStream]::new($startupDiagnosticPath,[IO.FileMode]::Append,[IO.FileAccess]::Write,[IO.FileShare]::Read);try{$remaining=65536-$log.Length;if($remaining -gt 0){$log.Write($entry,0,[int][Math]::Min($entry.Length,$remaining))}}finally{$log.Dispose()}}catch{}
+}
 $splash=$null;$engine=$null
 try {
+    Write-StartupDiagnostic ('PowerShell '+$PSVersionTable.PSVersion+'; language mode='+$ExecutionContext.SessionState.LanguageMode+'; apartment='+[Threading.Thread]::CurrentThread.GetApartmentState()+'; extracting verified startup helper')
     # MCR-MANIFEST-PLACEHOLDER
     $helper=$assetManifest | Where-Object {$_.Name -eq 'MediaReviewer.Core.dll'}
     $helperCompressed=Join-Path $instanceDirectory 'bootstrap.gzip';$helperPath=Join-Path $instanceDirectory 'MediaReviewer.Core.dll'
@@ -71,9 +76,10 @@ try {
     }
     if($OpenEvidencePackage){Start-PackageInterface $OpenEvidencePackage}else{Start-ReviewerInterface}
 } catch {
+    $failure=$_.Exception.Message;Write-StartupDiagnostic ($_.Exception.ToString());$diagnosticNotice=if([IO.File]::Exists($startupDiagnosticPath)){'Startup diagnostic: '+$startupDiagnosticPath}else{'Startup diagnostic could not be written in '+$instanceDirectory};Write-Output $diagnosticNotice
     if($splash){$splash.FindName('Stage').Text=$_.Exception.Message;$splash.Close()}
-    if(-not $VerifyDependencies -and -not $ScanPath -and -not $ResumeScanId -and -not $ImportHtmlPath){[Windows.MessageBox]::Show($_.Exception.Message,'Media Compliance Reviewer could not start',[Windows.MessageBoxButton]::OK,[Windows.MessageBoxImage]::Error) | Out-Null}
-    throw
+    if(-not $VerifyDependencies -and -not $ScanPath -and -not $ResumeScanId -and -not $ImportHtmlPath){[Windows.MessageBox]::Show(($failure+"`r`n`r`n"+$diagnosticNotice),'Media Compliance Reviewer could not start',[Windows.MessageBoxButton]::OK,[Windows.MessageBoxImage]::Error) | Out-Null}
+    throw [InvalidOperationException]::new(($failure+"`r`n`r`n"+$diagnosticNotice),$_.Exception)
 } finally {
     if($engine){$engine.Dispose()}
     if('MediaReviewer.Preview' -as [type]){[MediaReviewer.Preview]::Shutdown()}

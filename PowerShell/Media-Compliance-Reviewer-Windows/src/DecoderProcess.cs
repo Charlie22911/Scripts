@@ -60,14 +60,17 @@ namespace MediaReviewer {
                 });
                 var clock=Stopwatch.StartNew();
                 while(!read.IsCompleted){if(token.WaitHandle.WaitOne(25) || clock.ElapsedMilliseconds>=budget){Retire();try{read.GetAwaiter().GetResult();}catch{};token.ThrowIfCancellationRequested();throw new InvalidDataException("Preview exceeded the decoder time budget; its private process tree was stopped. The fingerprint is retained.");}}
-                requests++;try{return read.GetAwaiter().GetResult();}catch(DecoderProtocolException){Retire();throw;}catch(EndOfStreamException){string detail=Retire();throw new IOException("Private decoder exited before completing its response (crash, resource limit, or startup restriction). Fingerprint retained. "+detail);}catch(IOException){Retire();throw;}
+                requests++;try{return read.GetAwaiter().GetResult();}catch(DecoderProtocolException){Retire();throw;}catch(EndOfStreamException){string detail=Retire(true);throw new IOException("The private decoder ended before completing its response. "+detail);}catch(IOException){Retire();throw;}
             }finally{Monitor.Exit(gate);}
         }
-        string Retire(){
-            string detail="";retiring=true;
+        string Retire(bool includeExit=false){
+            string detail="";retiring=true;int? exit=null;
+            // EOF can precede Windows publishing the final process status by a few ticks.
+            // This short reap wait collects that status, not a retry of the failed work.
+            if(includeExit && process!=null && started && process.WaitForExit(100))exit=process.ExitCode;
             if(job!=null){job.StopAndWait();job.Dispose();job=null;}
             // Confirm exit before replacement: blocked OS I/O must never create abandoned helpers.
-            if(process!=null){if(started){if(!process.HasExited){try{process.Kill();}catch(InvalidOperationException){}}process.WaitForExit();}if(input!=null)input.Dispose();if(output!=null)output.Dispose();if(stderr!=null){try{detail=stderr.GetAwaiter().GetResult();}catch{}};process.Dispose();process=null;input=null;output=null;stderr=null;started=false;}retiring=false;return detail;
+            if(process!=null){if(started){if(!process.HasExited){try{process.Kill();}catch(InvalidOperationException){}}process.WaitForExit();}if(input!=null)input.Dispose();if(output!=null)output.Dispose();if(stderr!=null){try{detail=stderr.GetAwaiter().GetResult();}catch{}};process.Dispose();process=null;input=null;output=null;stderr=null;started=false;}retiring=false;return includeExit ? exit.HasValue ? StartupDiagnostics.ProcessExit("MediaReviewer.Decoder.exe",exit.Value,detail) : "MediaReviewer.Decoder.exe closed its response stream and was stopped by its owner before a natural exit status was available. "+detail : detail;
         }
         public void Dispose(){lock(gate){disposed=true;Retire();}}
     }
