@@ -1,0 +1,58 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:sys="clr-namespace:System;assembly=mscorlib" Title="Media Compliance Reviewer for Windows" Width="1160" Height="840" MinWidth="980" MinHeight="680" WindowStartupLocation="CenterScreen" FontFamily="Segoe UI" FontSize="13" Background="#F4F6F8" Foreground="#202B38">
+  <Window.Resources>
+    <Style TargetType="Button"><Setter Property="Margin" Value="3"/><Setter Property="Padding" Value="10,5"/><Setter Property="MinHeight" Value="30"/></Style>
+    <Style TargetType="TextBox"><Setter Property="Margin" Value="3"/><Setter Property="Padding" Value="6,4"/><Setter Property="MinHeight" Value="30"/><Setter Property="VerticalContentAlignment" Value="Center"/></Style>
+    <Style TargetType="ComboBox"><Setter Property="Margin" Value="3"/><Setter Property="MinHeight" Value="30"/><Setter Property="VerticalContentAlignment" Value="Center"/></Style>
+    <Style TargetType="CheckBox"><Setter Property="Margin" Value="6"/><Setter Property="VerticalAlignment" Value="Center"/></Style>
+    <Style x:Key="ThumbnailStyle" TargetType="Image"><Setter Property="Stretch" Value="Uniform"/><Setter Property="HorizontalAlignment" Value="Center"/><Setter Property="VerticalAlignment" Value="Center"/></Style>
+  </Window.Resources>
+  <Grid Margin="12" Background="#F4F6F8">
+    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="84"/></Grid.RowDefinitions>
+    <Grid Grid.Row="0" Margin="0,0,0,6"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+      <StackPanel><TextBlock Text="Media Compliance Reviewer" FontSize="23" FontWeight="SemiBold"/><TextBlock x:Name="DatabaseLabel" Text="Windows · portable offline review" Foreground="#637487" TextTrimming="CharacterEllipsis"/></StackPanel>
+      <WrapPanel Grid.Column="1" VerticalAlignment="Center"><Button x:Name="CreateButton" Content="Create"/><Button x:Name="OpenButton" Content="Open"/><Button x:Name="MaintenanceButton" Content="Maintenance"/><Button x:Name="PreviewTasksButton" Content="Preview tasks"/><Button x:Name="LogButton" Content="Log"/><Button x:Name="HelpButton" Content="Help"/><Button x:Name="AboutButton" Content="About"/></WrapPanel>
+    </Grid>
+    <Border Grid.Row="1" Padding="6" Background="White" BorderBrush="#D5DDE6" BorderThickness="1" CornerRadius="4">
+      <StackPanel>
+        <WrapPanel><TextBlock Text="Source root" VerticalAlignment="Center" Margin="4"/><TextBox x:Name="SourceBox" Width="320" ToolTip="Local folder, mapped drive, or UNC home-share root"/><Button x:Name="BrowseButton" Content="Browse…"/><Button x:Name="StartButton" Content="Start scan"/><Button x:Name="ResumeButton" Content="Resume scan"/><Button x:Name="CancelButton" Content="Cancel scan"/></WrapPanel>
+        <WrapPanel>
+          <TextBlock Text="Types" VerticalAlignment="Center" Margin="4"/><ComboBox x:Name="ModeBox" Width="100" SelectedIndex="0"><ComboBoxItem Content="Quick"/><ComboBoxItem Content="Deep"/><ComboBoxItem Content="Custom"/></ComboBox>
+          <Button x:Name="FormatsButton" Content="File types…" ToolTip="Choose image, RAW and video families"/>
+          <TextBlock Text="Workers" VerticalAlignment="Center" Margin="4"/><ComboBox x:Name="WorkerBox" Width="55" SelectedIndex="3"><sys:Int32>1</sys:Int32><sys:Int32>2</sys:Int32><sys:Int32>3</sys:Int32><sys:Int32>4</sys:Int32><sys:Int32>5</sys:Int32><sys:Int32>6</sys:Int32><sys:Int32>7</sys:Int32><sys:Int32>8</sys:Int32></ComboBox>
+          <TextBlock Text="Skip older than" VerticalAlignment="Center" Margin="4"/><TextBox x:Name="AgeBox" Text="0" Width="42"/><TextBlock Text="years (0 = all)" VerticalAlignment="Center"/>
+          <Button x:Name="OptionsButton" Content="Options…" ToolTip="Choose AppData and root-level file inclusion"/>
+        </WrapPanel>
+      </StackPanel>
+    </Border>
+    <WrapPanel Grid.Row="2" Margin="0,6,0,0"><Button x:Name="ToReviewTab" Content="To be reviewed (0)" Tag="TO_REVIEW"/><Button x:Name="CompliantTab" Content="Compliant (0)" Tag="COMPLIANT"/><Button x:Name="NonCompliantTab" Content="Non-compliant (0)" Tag="NON_COMPLIANT"/><Button x:Name="EvidenceTab" Content="Evidence (0)" Tag="EVIDENCE"/></WrapPanel>
+    <WrapPanel Grid.Row="3">
+      <TextBlock Text="Search" VerticalAlignment="Center" Margin="4"/><TextBox x:Name="SearchBox" Width="180"/><TextBlock Text="User folder" VerticalAlignment="Center" Margin="4"/><TextBox x:Name="FolderBox" Width="130"/>
+      <ComboBox x:Name="TypeBox" Width="110" SelectedIndex="0"><ComboBoxItem Content="All types" Tag=""/></ComboBox>
+      <ComboBox x:Name="SortBox" Width="145" SelectedIndex="0"><ComboBoxItem Content="Found · first found" Tag="found"/><ComboBoxItem Content="Name · A to Z" Tag="name"/><ComboBoxItem Content="Size · largest first" Tag="size"/></ComboBox>
+      <ComboBox x:Name="FitBox" Width="65" SelectedIndex="0"><ComboBoxItem Content="Fit" Tag="Uniform"/><ComboBoxItem Content="Fill" Tag="UniformToFill"/></ComboBox><Button x:Name="FilterButton" Content="Apply"/><Button x:Name="ResetButton" Content="Reset view"/>
+    </WrapPanel>
+    <Border x:Name="ActionBar" Grid.Row="4" Background="#E5ECF5" Padding="4" CornerRadius="4" Margin="0,4">
+      <WrapPanel><TextBlock x:Name="SelectionLabel" Text="0 selected" VerticalAlignment="Center" Margin="5" Width="85"/><TextBlock Text="Reviewer" VerticalAlignment="Center" Margin="3"/><TextBox x:Name="ReviewerBox" Width="110" MaxLength="128" ToolTip="Reviewer label"/><TextBlock Text="Notes" VerticalAlignment="Center" Margin="3"/><TextBox x:Name="NotesBox" Width="150" ToolTip="Notes saved with the selected decisions"/><Button x:Name="CompliantButton" Content="Compliant"/><Button x:Name="NonCompliantButton" Content="Non-compliant"/><Button x:Name="UnreviewedButton" Content="To be reviewed"/><Button x:Name="SelectPageButton" Content="Select page"/><Button x:Name="RetryPreviewsButton" Content="Retry previews"/><Button x:Name="ClearSelectionButton" Content="Clear selection"/><Button x:Name="VerifyButton" Content="Verify full" ToolTip="Select one candidate card to read all its current source files and review the full-hash result."/><Button x:Name="IdentityHistoryButton" Content="Identity history"/><Button x:Name="CaptureEvidenceButton" Content="Evidence"/><Button x:Name="VaultButton" Content="Unlock originals"/><Button x:Name="StoredOriginalButton" Content="Stored original"/><Button x:Name="ExportOriginalButton" Content="Export original..."/></WrapPanel>
+    </Border>
+    <Grid Grid.Row="5">
+      <ScrollViewer x:Name="GalleryScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" CanContentScroll="False">
+        <ItemsControl x:Name="CardList">
+          <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+          <ItemsControl.ItemTemplate><DataTemplate>
+            <Border Width="220" Margin="4" Padding="9" Background="White" BorderBrush="#D5DDE6" BorderThickness="1" CornerRadius="4">
+              <StackPanel>
+                <Grid Height="140" Background="#EAF0F5"><Image Source="{Binding Image}" Style="{DynamicResource ThumbnailStyle}"/><TextBlock Text="{Binding Placeholder}" Visibility="{Binding PlaceholderVisibility}" HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap" Margin="8"/></Grid>
+                <CheckBox Content="{Binding Name}" IsChecked="{Binding IsSelected,Mode=TwoWay,UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding CanSelect}" Margin="0,7,0,3" ToolTip="{Binding FullPath}"/>
+                <TextBlock Text="{Binding PathLabel}" TextTrimming="CharacterEllipsis" Foreground="#637487" ToolTip="{Binding FullPath}"/><TextBlock Text="{Binding Info}" FontSize="11" Margin="0,3"/><TextBlock Text="{Binding FingerprintLabel}" FontSize="11" Foreground="#637487"/>
+                <TextBlock Text="{Binding PreviewRetryLabel}" FontSize="11" Height="16" TextTrimming="CharacterEllipsis"/><StackPanel Orientation="Horizontal" HorizontalAlignment="Right"><Button x:Name="CardDetailsButton" Content="Details / notes" Padding="8,2"/><Button x:Name="CardInspectButton" Content="Inspect" Padding="8,2"/></StackPanel>
+              </StackPanel>
+            </Border>
+          </DataTemplate></ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </ScrollViewer>
+      <Border x:Name="EmptyPanel" Background="#F4F6F8" Padding="24" VerticalAlignment="Top"><StackPanel><TextBlock x:Name="EmptyTitle" Text="Create or open a local database" FontSize="19" FontWeight="SemiBold"/><TextBlock x:Name="EmptyText" Text="Media sources may be network shares. The active database must be on local storage." TextWrapping="Wrap" Margin="0,8"/></StackPanel></Border>
+    </Grid>
+    <WrapPanel Grid.Row="6" Margin="0,6"><TextBlock Text="Items per page" VerticalAlignment="Center" Margin="4"/><ComboBox x:Name="PageSizeBox" Width="75" SelectedIndex="2"><sys:Int32>20</sys:Int32><sys:Int32>40</sys:Int32><sys:Int32>60</sys:Int32><sys:Int32>100</sys:Int32><sys:Int32>200</sys:Int32></ComboBox><Button x:Name="PreviousButton" Content="Previous"/><TextBox x:Name="PageBox" Width="50" Text="1"/><Button x:Name="GoButton" Content="Go"/><Button x:Name="NextButton" Content="Next"/><TextBlock x:Name="PageLabel" VerticalAlignment="Center" Margin="8" Text="No database open"/></WrapPanel>
+    <Border x:Name="StatusPanel" Grid.Row="7" Background="#EAF0F5" Padding="8" CornerRadius="4"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><TextBlock x:Name="ActivityText" Text="Ready to create or open a database" TextTrimming="CharacterEllipsis"/><TextBlock x:Name="MessageText" Text="Quick selects common images and videos. Deep adds the other image and RAW families." Foreground="#526477" TextTrimming="CharacterEllipsis" Margin="0,3,0,0"/><DockPanel Height="24"><Button x:Name="RetryPreferencesButton" DockPanel.Dock="Right" Content="Retry preferences" Visibility="Hidden" Padding="6,1" Margin="0" MinHeight="20" Height="22"/><TextBlock x:Name="PreferencesText" Text="Preferences load when a database opens." VerticalAlignment="Center" FontSize="11" TextTrimming="CharacterEllipsis"/></DockPanel></StackPanel><Button Grid.Column="1" x:Name="CancelWorkButton" Content="Cancel task" Visibility="Collapsed" VerticalAlignment="Center"/></Grid></Border>
+  </Grid>
+</Window>

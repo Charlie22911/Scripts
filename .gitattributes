@@ -1,0 +1,2 @@
+# Preserve the portable distribution exactly, including its embedded payloads and BOM.
+PowerShell/Media-Compliance-Reviewer-Windows-*.ps1 -text -diff
