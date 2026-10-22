@@ -4,7 +4,7 @@
 Previews or requests restarts of AD workstations, excluding the local computer.
 
 .DESCRIPTION
-Finds enabled computer accounts named U-LT-* or U-WS-* throughout the selected
+Finds enabled computer accounts named U-LT* or U-WS* throughout the selected
 AD domain, or within SearchBase if supplied. Known Windows Server accounts
 are skipped. The computer executing the script is excluded by short name,
 DNS hostname, and any DNS address matching a local network interface or
@@ -182,7 +182,7 @@ $connection['Server'] = $rootDse.dnsHostName
 if (-not $PSBoundParameters.ContainsKey('SearchBase')) { $SearchBase = $rootDse.defaultNamingContext }
 
 # Materialize the complete AD result before sending any restart requests.
-$computers = @(Get-ADComputer -Filter 'Enabled -eq $true -and (Name -like "U-LT-*" -or Name -like "U-WS-*")' `
+$computers = @(Get-ADComputer -Filter 'Enabled -eq $true -and (Name -like "U-LT*" -or Name -like "U-WS*")' `
     -SearchBase $SearchBase -SearchScope Subtree -Properties DNSHostName, OperatingSystem @connection |
     Sort-Object Name)
 
@@ -203,7 +203,7 @@ try {
 
     foreach ($computer in $computers) {
         if (-not $computer.Enabled -or
-            -not ($computer.Name -like 'U-LT-*' -or $computer.Name -like 'U-WS-*')) { continue }
+            -not ($computer.Name -like 'U-LT*' -or $computer.Name -like 'U-WS*')) { continue }
         $target = [string]$computer.DNSHostName
         if ([string]::IsNullOrWhiteSpace($target)) { $target = [string]$computer.Name }
         $target = $target.TrimEnd('.')

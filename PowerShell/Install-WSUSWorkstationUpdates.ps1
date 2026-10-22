@@ -4,7 +4,7 @@
 Previews or starts installation of approved WSUS updates on AD workstations.
 
 .DESCRIPTION
-Targets enabled U-LT-* and U-WS-* computers, excluding the executing computer
+Targets enabled U-LT* and U-WS* computers, excluding the executing computer
 by hostname and local IP addresses. Known server accounts are skipped, and
 the remote host identity is checked again before task creation.
 
@@ -119,7 +119,7 @@ function Invoke-WSUSUpdateWorker {
             $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
             if ($system.Name -ieq $Configuration.ExcludedComputerName -or
                 $system.Name -ine $Configuration.ExpectedComputerName -or
-                $system.Name -notmatch '^U-(LT|WS)-' -or $os.ProductType -ne 1) {
+                $system.Name -notmatch '^U-(LT|WS)' -or $os.ProductType -ne 1) {
                 throw 'Worker identity check failed: expected a different, matching Windows workstation.'
             }
             $result.BootTimeBeforeRebootUtc=$os.LastBootUpTime.ToUniversalTime().ToString('o')
@@ -317,7 +317,7 @@ function Invoke-WSUSRemoteAction {
     if ($system.Name -ieq $options.ExcludedComputerName) {
         return [pscustomobject]@{Status='SkippedLocal';RunDirectory='';Detail='Remote session is the excluded computer.';Result=$null}
     }
-    if ($os.ProductType -ne 1 -or $system.Name -notmatch '^U-(LT|WS)-' -or $system.Name -ine $options.ExpectedComputerName) {
+    if ($os.ProductType -ne 1 -or $system.Name -notmatch '^U-(LT|WS)' -or $system.Name -ine $options.ExpectedComputerName) {
         throw 'Remote identity does not match the expected Windows workstation.'
     }
     $policy=Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' -ErrorAction Stop
@@ -433,7 +433,7 @@ $rootDse=Get-ADRootDSE @connection
 if ([string]::IsNullOrWhiteSpace($rootDse.dnsHostName) -or [string]::IsNullOrWhiteSpace($rootDse.defaultNamingContext)) {throw 'AD did not return a controller and domain root.'}
 $connection['Server']=$rootDse.dnsHostName
 if (-not $PSBoundParameters.ContainsKey('SearchBase')) {$SearchBase=$rootDse.defaultNamingContext}
-$computers=@(Get-ADComputer -Filter 'Enabled -eq $true -and (Name -like "U-LT-*" -or Name -like "U-WS-*")' `
+$computers=@(Get-ADComputer -Filter 'Enabled -eq $true -and (Name -like "U-LT*" -or Name -like "U-WS*")' `
     -SearchBase $SearchBase -SearchScope Subtree -Properties DNSHostName,OperatingSystem @connection | Sort-Object Name)
 $runId=[guid]::NewGuid().ToString('N')
 $workerDefinition="function Invoke-WSUSUpdateWorker {`r`n"+${function:Invoke-WSUSUpdateWorker}.ToString()+"`r`n}"
@@ -452,7 +452,7 @@ try {
     $writer.Flush();$logStream.Flush($true)
     Write-Host ('Excluded local computer: {0}. Run ID: {1}' -f $localMachine,$runId)
     foreach ($computer in $computers) {
-        if (-not $computer.Enabled -or -not ($computer.Name -like 'U-LT-*' -or $computer.Name -like 'U-WS-*')) {continue}
+        if (-not $computer.Enabled -or -not ($computer.Name -like 'U-LT*' -or $computer.Name -like 'U-WS*')) {continue}
         $target=[string]$computer.DNSHostName
         if ([string]::IsNullOrWhiteSpace($target)) {$target=[string]$computer.Name}
         $target=$target.TrimEnd('.')
