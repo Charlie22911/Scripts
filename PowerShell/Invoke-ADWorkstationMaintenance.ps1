@@ -46,6 +46,10 @@ blocks another deployment; inspect its state and logs before removing it.
 
 Requires Windows PowerShell 5.1, the ActiveDirectory module, DNS client
 tools, and an account with permission to administer the remote workstations.
+Launch with powershell.exe, including from Windows Terminal. PowerShell 7
+(pwsh.exe) is not supported; Restart-Computer there has no -Protocol parameter.
+The script checks the host before discovery and checks the resolved restart
+command before reboot-only operations.
 Reboot-only uses DCOM by default; -Protocol WSMan selects WinRM instead.
 No remoting, firewall, execution policy or WSUS approval settings are changed.
 Offline machines are not queued or retried. RestartRequested confirms only
@@ -98,6 +102,10 @@ CSV destination in an existing directory. Defaults to a timestamped file
 in the current filesystem directory. Existing logs are never overwritten.
 
 .EXAMPLE
+powershell.exe -NoProfile -File ".\Invoke-ADWorkstationMaintenance.ps1"
+Opens the menu in Windows PowerShell 5.1, including from a PowerShell 7 session.
+
+.EXAMPLE
 .\Invoke-ADWorkstationMaintenance.ps1
 Opens the menu and confirms the target list before performing maintenance.
 
@@ -131,6 +139,10 @@ param(
     [ValidateSet('DCOM','WSMan')][string]$Protocol='DCOM',
     [ValidateNotNullOrEmpty()][string]$LogPath=(Join-Path (Get-Location).Path ('WorkstationMaintenance-{0}.csv' -f (Get-Date -Format 'yyyyMMdd-HHmmss-fff')))
 )
+
+if($PSVersionTable.PSEdition -ne 'Desktop') {
+    throw 'This script requires Windows PowerShell 5.1 (powershell.exe). PowerShell 7 (pwsh.exe) does not support Restart-Computer -Protocol. Run: powershell.exe -NoProfile -File ".\Invoke-ADWorkstationMaintenance.ps1"'
+}
 
 function Invoke-WSUSUpdateWorker {
     param([object]$Configuration)
@@ -477,6 +489,14 @@ $install=$Action -in @('InstallUpdates','InstallUpdatesAndRestart')
 $restartIfNeeded=$Action -eq 'InstallUpdatesAndRestart'
 $forceRestartEnabled=[bool]($ForceRestart -and ($restartIfNeeded -or $Action -eq 'Restart'))
 if($Wait -and -not $install){throw '-Wait is only valid for update operations.'}
+if($Action -eq 'Restart') {
+    $restartCommand=Get-Command Restart-Computer -ErrorAction Stop
+    foreach($parameterName in @('ComputerName','Protocol','Credential','Force')) {
+        if(-not $restartCommand.Parameters.ContainsKey($parameterName)) {
+            throw ("The resolved Restart-Computer command does not support -{0}. Use Windows PowerShell 5.1 (powershell.exe) and check Get-Command Restart-Computer -All for a conflicting function or module." -f $parameterName)
+        }
+    }
+}
 
 $exemptNames=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 foreach($entry in $ExcludeComputer) {
