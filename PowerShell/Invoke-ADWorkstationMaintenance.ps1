@@ -1,708 +1,414 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-Interactively previews, reboots, or installs WSUS updates on AD workstations.
-
+Previews or dispatches concurrent forced restarts to Active Directory workstations.
 .DESCRIPTION
-Run without -Action for a menu: preview, reboot only, WSUS updates only, or
-WSUS updates with a reboot when needed. The menu asks for optional exempt
-computer names and alternate credentials, then shows the targets. Type RUN
-to confirm the batch. Enter at the menu selects preview; Enter at the final
-confirmation cancels. Each invocation performs one operation and exits.
+Run in Windows PowerShell 5.1 (powershell.exe). The interactive menu contains
+Preview and Force reboot. Enabled U-LT* and U-WS* accounts are selected from
+AD using the identity running the script. Optional credentials apply only
+to outbound reboot requests. Passwords are not saved or put on a command line.
 
-Targets enabled U-LT* and U-WS* computer accounts in the selected AD domain
-or SearchBase. The executing computer is always excluded by actual host
-identity and DNS addresses. Known server accounts are skipped. Additional
-exemptions are exact, case-insensitive short names or FQDNs, never wildcards.
-An exempt FQDN also exempts that short computer name throughout the search.
-In a remote PowerShell session, the executing computer is the session host.
+Reboots use actual shutdown.exe /m \\IPv4 /r /f /t 300 commands, with an
+adjustable countdown and warning. There are 64 concurrent workers by default.
+Slow requests occupy individual slots; completed results are processed without
+waiting for earlier targets. RequestTimeoutSeconds limits each shutdown.exe
+process, not the countdown. A timeout is uncertain: a client may already have
+accepted the request. No automatic retries are made.
 
-Restarts are forced by default and can discard unsaved work. Choose an
-orderly restart in the menu or pass -ForceRestart:$false. Updates-only never
-requests a reboot; independent WSUS/GPO deadlines may still enforce one.
+The executing computer is always excluded by hostname and all local IPs.
+Additional exemptions accept exact short names/FQDNs, ignoring case. Known
+servers, disabled accounts, duplicates and DNS failures are skipped. DNS/local
+address checks run concurrently and repeat immediately before every request.
+ComputerName restricts the inventory to selected names. Subnet restricts
+resolved addresses to selected IPv4 CIDRs, useful when running from a relay
+in each authorized subnet. No addresses or routes are guessed.
 
-AD discovery uses the identity running this script. Alternate credentials
-are used only for remote restart requests and WSUS task deployment/result
-collection. The script does not serialize or save the credential. Update
-tasks run as SYSTEM on each client.
+Run from an authorized management server that can reach the client subnets,
+or from an authorized host within each subnet. Remote Shutdown firewall/network
+access and the Force shutdown from a remote system user right are required.
+Moving to a server alone does not bypass blocked network paths. This script
+does not change firewall, routing, Group Policy, or network configuration.
+Reboot-only requires neither WMI nor WinRM.
 
-WSUS uses native Windows Update Agent and the client's configured managed
-server, with no public Windows Update fallback or policy changes. Only
-assigned, non-hidden, uninstalled software installation deployments are
-selected. Drivers, feature upgrades and interactive updates are excluded;
-selected update EULAs are accepted. WinRM must already be enabled on clients.
-Each run does one scan/download/install pass. Prerequisites or exclusive
-updates may require another pass. Failed or partial runs do not auto-reboot.
-A pending reboot before installation requires a rerun after the reboot.
+Forced restarts can discard unsaved work after the countdown. Default delay
+is 300 seconds; zero is immediate. RestartRequested records that shutdown.exe
+returned success, not that a physical reboot occurred. Already-pending reboot
+requests are recorded separately, without cancelling or replacing them.
 
-Interactive update operations wait for results by default. For command-line
-use, supply -Wait to collect results. Queued means Task Scheduler accepted
-the job, not that updates installed. TimeoutMinutes starts after queueing;
-one in-flight WinRM call may extend it. Timeout does not cancel installation.
-Clients retain protected worker/configuration, Result.json and Updates.csv
-under %ProgramData%\ADWSUSMaintenance-<DeployingUserSID>\<RunId>. Completed
-workers remove their task. An existing ADWorkstation-WSUS-Updates task
-blocks another deployment; inspect its state and logs before removing it.
-
-Requires Windows PowerShell 5.1, the ActiveDirectory module, DNS client
-tools, and an account with permission to administer the remote workstations.
-Launch with powershell.exe, including from Windows Terminal. PowerShell 7
-(pwsh.exe) is not supported; Restart-Computer there has no -Protocol parameter.
-The script checks the host before discovery and checks the resolved restart
-command before reboot-only operations.
-Reboot-only uses DCOM by default; -Protocol WSMan selects WinRM instead.
-No remoting, firewall, execution policy or WSUS approval settings are changed.
-Offline machines are not queued or retried. RestartRequested confirms only
-that the request returned successfully, not that the computer rebooted.
-
-All modes write a UTF-8 CSV without overwriting an existing file. -WhatIf
-prevents remote tasks and restarts, while still discovering targets and
-writing the local log. AD inventory or log errors stop the operation;
-individual DNS, restart and task deployment failures are logged and skipped.
+The menu requires RUN before dispatch. Explicit -Action Restart uses one
+batch confirmation; -Confirm:$false suppresses it. -WhatIf writes inventory
+and the CSV without sending reboot requests. Existing CSVs are not overwritten.
+AD/logging failures stop the operation; individual request failures are logged.
 
 .PARAMETER Action
-Omit to use the interactive menu. Preview, Restart, InstallUpdates, and
-InstallUpdatesAndRestart are available for noninteractive operation.
-Active command-line operations use PowerShell confirmation prompts; pass
--Confirm:$false to suppress them or -WhatIf to preview the requests.
-
+Preview or Restart. Omit for the interactive menu. Restart always forces closure.
+.PARAMETER ComputerName
+Optional exact short names/FQDNs to include. Other targeting/exemption rules apply.
 .PARAMETER ExcludeComputer
-Additional exact short names or FQDNs to exempt from every operation.
-Accepts an array, or comma/semicolon-separated names. Local exclusion is
-always applied separately and cannot be disabled.
-
+Additional exact computer names/FQDNs to exempt. Arrays or comma-separated lists.
+.PARAMETER Subnet
+Optional IPv4 CIDRs to include, such as 192.0.2.0/24. Does not change routing.
 .PARAMETER Credential
-Optional PSCredential for remote operations only. AD queries always use
-the launch identity. The menu offers a
-Get-Credential prompt when this parameter is omitted. Cancelling that
-credential prompt stops the operation.
-
-.PARAMETER ForceRestart
-Force permitted restarts. Defaults to true. Has no effect in updates-only
-or preview mode. Pass -ForceRestart:$false for orderly restarts.
-
-.PARAMETER Wait
-Collect WSUS worker results. Defaults to true in the interactive menu and
-false when -Action is supplied. Valid only for an update operation.
-
-.PARAMETER TimeoutMinutes
-Maximum result-tracking period after queueing. Defaults to 120 minutes.
-
+Optional remote PSCredential. AD discovery always uses the launch identity.
+.PARAMETER ThrottleLimit
+Maximum parallel workers. Default 64; range 1-256.
+.PARAMETER RestartDelaySeconds
+Restart warning/countdown on each client. Default 300; zero is immediate.
+.PARAMETER RequestTimeoutSeconds
+Maximum wait for each shutdown.exe process. Default 20; range 5-300.
+.PARAMETER RestartMessage
+Warning shown on each client. Defaults to a message including the countdown.
 .PARAMETER Server
-Optional domain DNS name or domain controller for AD discovery.
-
+Optional AD domain or domain controller.
 .PARAMETER SearchBase
-Optional OU distinguished name. Defaults to the selected domain root.
-
-.PARAMETER Protocol
-DCOM or WSMan for reboot-only requests. WSUS operations always use WinRM.
-
+Optional OU distinguished name; defaults to the domain root.
 .PARAMETER LogPath
-CSV destination in an existing directory. Defaults to a timestamped file
-in the current filesystem directory. Existing logs are never overwritten.
+CSV destination in an existing directory. Defaults to a timestamped local file.
 
 .EXAMPLE
 powershell.exe -NoProfile -File ".\Invoke-ADWorkstationMaintenance.ps1"
-Opens the menu in Windows PowerShell 5.1, including from a PowerShell 7 session.
-
+Opens the preview/forced reboot menu.
 .EXAMPLE
-.\Invoke-ADWorkstationMaintenance.ps1
-Opens the menu and confirms the target list before performing maintenance.
-
+.\Invoke-ADWorkstationMaintenance.ps1 -Action Restart -ComputerName U-LT001 -Credential (Get-Credential)
+Requests a forced restart on one selected workstation, after confirmation.
 .EXAMPLE
-.\Invoke-ADWorkstationMaintenance.ps1 -ExcludeComputer 'U-LT001' -Credential (Get-Credential)
-Opens the menu with a preconfigured exemption and alternate credentials.
-
+.\Invoke-ADWorkstationMaintenance.ps1 -Action Restart -Subnet 192.0.2.0/24 -ExcludeComputer U-WS002 -Credential (Get-Credential) -Confirm:$false
+Dispatches concurrent requests to the selected subnet with a five-minute warning.
 .EXAMPLE
-.\Invoke-ADWorkstationMaintenance.ps1 -Action Restart -ExcludeComputer 'U-WS002','U-LT001' -WhatIf
-Previews forced restart requests while exempting two computers and the host.
-
-.EXAMPLE
-.\Invoke-ADWorkstationMaintenance.ps1 -Action InstallUpdatesAndRestart -Wait -Credential (Get-Credential) -Confirm:$false
-Installs approved WSUS updates and permits forced restarts when needed.
-
-.EXAMPLE
-.\Invoke-ADWorkstationMaintenance.ps1 -Action InstallUpdates -Wait -Confirm:$false
-Installs approved WSUS updates without requesting any reboot.
+.\Invoke-ADWorkstationMaintenance.ps1 -Action Restart -RestartDelaySeconds 0 -WhatIf
+Previews immediate forced restart requests without sending them.
 #>
-[CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='High')]
+[CmdletBinding(SupportsShouldProcess=$true,ConfirmImpact='High')]
 param(
-    [ValidateSet('Preview','Restart','InstallUpdates','InstallUpdatesAndRestart')]
-    [string]$Action,
+    [ValidateSet('Preview','Restart')][string]$Action,
+    [string[]]$ComputerName=@(),
     [string[]]$ExcludeComputer=@(),
+    [string[]]$Subnet=@(),
     [ValidateNotNull()][pscredential]$Credential,
-    [switch]$ForceRestart=$true,
-    [switch]$Wait,
-    [ValidateRange(1,1440)][int]$TimeoutMinutes=120,
+    [ValidateRange(1,256)][int]$ThrottleLimit=64,
+    [ValidateRange(0,86400)][int]$RestartDelaySeconds=300,
+    [ValidateRange(5,300)][int]$RequestTimeoutSeconds=20,
+    [ValidateLength(1,512)][string]$RestartMessage,
     [ValidateNotNullOrEmpty()][string]$Server,
     [ValidateNotNullOrEmpty()][string]$SearchBase,
-    [ValidateSet('DCOM','WSMan')][string]$Protocol='DCOM',
-    [ValidateNotNullOrEmpty()][string]$LogPath=(Join-Path (Get-Location).Path ('WorkstationMaintenance-{0}.csv' -f (Get-Date -Format 'yyyyMMdd-HHmmss-fff')))
+    [ValidateNotNullOrEmpty()][string]$LogPath=(Join-Path (Get-Location).Path ('WorkstationRestarts-{0}.csv' -f (Get-Date -Format 'yyyyMMdd-HHmmss-fff')))
 )
-
 if($PSVersionTable.PSEdition -ne 'Desktop') {
-    throw 'This script requires Windows PowerShell 5.1 (powershell.exe). PowerShell 7 (pwsh.exe) does not support Restart-Computer -Protocol. Run: powershell.exe -NoProfile -File ".\Invoke-ADWorkstationMaintenance.ps1"'
+    throw 'Use Windows PowerShell 5.1 (powershell.exe). Run: powershell.exe -NoProfile -File ".\Invoke-ADWorkstationMaintenance.ps1"'
 }
 
-function Invoke-WSUSUpdateWorker {
-    param([object]$Configuration)
-    Set-StrictMode -Version 2.0
-    $ErrorActionPreference = 'Stop'
-    $rows = [Collections.Generic.List[object]]::new()
-    $result = [ordered]@{
-        RunId=$Configuration.RunId; ComputerName=$Configuration.ExpectedComputerName
-        Status='Starting'; Complete=$false; StartedUtc=[datetime]::UtcNow.ToString('o'); CompletedUtc=''
-        WSUSServer=''; Found=0; Selected=0; Installed=0; Failed=0; Skipped=0; Deferred=0
-        RebootRequired=$false; RebootAction='None'; BootTimeBeforeRebootUtc=''; RebootVerifiedUtc=''; Note=''; Error=''; CleanupError=''
+function Initialize-NativeShutdown {
+    if('ADWorkstationMaintenance.NativeShutdown' -as [type]){return}
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.IO;
+using System.Net;
+using System.Net.NetworkInformation;
+using System.Runtime.InteropServices;
+using System.Security;
+using System.Text;
+namespace ADWorkstationMaintenance {
+ public static class NativeShutdown {
+  [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)]
+  struct StartupInfo {
+   public int cb; public string reserved,desktop,title; public int x,y,xSize,ySize,xChars,yChars,fill,flags;
+   public short show,reservedSize; public IntPtr reserved2,input,output,error;
+  }
+  [StructLayout(LayoutKind.Sequential)] struct ProcessInfo { public IntPtr process,thread; public int processId,threadId; }
+  [DllImport("advapi32.dll",CharSet=CharSet.Unicode,SetLastError=true)]
+  static extern bool CreateProcessWithLogonW(string user,string domain,IntPtr password,uint logonFlags,string application,StringBuilder command,uint flags,IntPtr environment,string directory,ref StartupInfo startup,out ProcessInfo information);
+  [DllImport("kernel32.dll",SetLastError=true)] static extern bool CloseHandle(IntPtr handle);
+  [DllImport("kernel32.dll",SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle,uint milliseconds);
+  [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr handle,out uint exit);
+  [DllImport("kernel32.dll",SetLastError=true)] static extern bool TerminateProcess(IntPtr handle,uint exit);
+  static string Quote(string text) {
+   StringBuilder result=new StringBuilder("\""); int slashes=0;
+   foreach(char c in text) {
+    if(c=='\\'){slashes++;continue;}
+    if(c=='"') result.Append('\\',slashes*2+1).Append(c);
+    else result.Append('\\',slashes).Append(c);
+    slashes=0;
+   }
+   return result.Append('\\',slashes*2).Append('"').ToString();
+  }
+  public static string BuildArguments(string target,string message,uint delay) {
+   return "/m \\\\"+target+" /r /f /t "+delay+" /d p:4:2 /c "+Quote(message);
+  }
+  public static void Run(string target,string message,uint delay,int timeoutSeconds,string user,string domain,SecureString password) {
+   IPAddress address;
+   if(!IPAddress.TryParse(target,out address) || address.AddressFamily!=System.Net.Sockets.AddressFamily.InterNetwork ||
+      IPAddress.IsLoopback(address) || address.Equals(IPAddress.Any) || address.Equals(IPAddress.Broadcast))
+    throw new ArgumentException("An explicit remote IPv4 address is required.");
+   foreach(NetworkInterface adapter in NetworkInterface.GetAllNetworkInterfaces())
+    foreach(UnicastIPAddressInformation local in adapter.GetIPProperties().UnicastAddresses)
+     if(local.Address.Equals(address)) throw new ArgumentException("The executing computer cannot be restarted.");
+   string application=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),"shutdown.exe");
+   string arguments=BuildArguments(address.ToString(),message,delay);
+   if(password==null) {
+    ProcessStartInfo start=new ProcessStartInfo(application,arguments);
+    start.UseShellExecute=false; start.CreateNoWindow=true; start.RedirectStandardOutput=true; start.RedirectStandardError=true;
+    using(Process process=Process.Start(start)) {
+     System.Threading.Tasks.Task<string> output=process.StandardOutput.ReadToEndAsync();
+     System.Threading.Tasks.Task<string> error=process.StandardError.ReadToEndAsync();
+     if(!process.WaitForExit(timeoutSeconds*1000)) {
+      try {process.Kill();} catch(InvalidOperationException) {}
+      throw new TimeoutException("shutdown.exe request timed out. The target may have accepted it; do not automatically retry.");
+     }
+     string detail=(output.Result+" "+error.Result).Trim();
+     if(process.ExitCode!=0) throw new Win32Exception(process.ExitCode,"shutdown.exe exit "+process.ExitCode+": "+detail);
     }
-    $resultPath = Join-Path $Configuration.RunDirectory 'Result.json'
-    function Save-WorkerResult {
-        $temporary = $resultPath + '.tmp'
-        [IO.File]::WriteAllText($temporary, ($result | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($true))
-        if ([IO.File]::Exists($resultPath)) { [IO.File]::Replace($temporary, $resultPath, [System.Management.Automation.Language.NullString]::Value) }
-        else { [IO.File]::Move($temporary, $resultPath) }
+    return;
+   }
+   IntPtr secret=IntPtr.Zero; ProcessInfo information=new ProcessInfo();
+   try {
+    secret=Marshal.SecureStringToGlobalAllocUnicode(password);
+    StartupInfo startup=new StartupInfo();startup.cb=Marshal.SizeOf(typeof(StartupInfo));
+    // LOGON_NETCREDENTIALS_ONLY preserves the launch identity locally and
+    // uses the supplied account only for outbound network authentication.
+    if(!CreateProcessWithLogonW(user,domain,secret,2,application,new StringBuilder(Quote(application)+" "+arguments),0x08000000,IntPtr.Zero,Path.GetDirectoryName(application),ref startup,out information))
+     throw new Win32Exception(Marshal.GetLastWin32Error());
+    Marshal.ZeroFreeGlobalAllocUnicode(secret);secret=IntPtr.Zero;
+    uint wait=WaitForSingleObject(information.process,(uint)timeoutSeconds*1000u);
+    if(wait==258) {
+     TerminateProcess(information.process,1460);
+     throw new TimeoutException("shutdown.exe request timed out. The target may have accepted it; do not automatically retry.");
     }
-    Save-WorkerResult
-    try {
-        # The inner block allows one-pass early exits while retaining the
-        # shared final logging, task cleanup, and optional reboot handling.
-        & {
-            $system = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
-            $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
-            if ($system.Name -ieq $Configuration.ExcludedComputerName -or
-                $system.Name -ine $Configuration.ExpectedComputerName -or
-                $system.Name -notmatch '^U-(LT|WS)' -or $os.ProductType -ne 1) {
-                throw 'Worker identity check failed: expected a different, matching Windows workstation.'
-            }
-            if ($null -ne $Configuration.PSObject.Properties['ExcludedComputerNames'] -and
-                $system.Name -in @($Configuration.ExcludedComputerNames)) {
-                throw 'Worker computer matches the exemption list. No updates will be installed.'
-            }
-            $result.BootTimeBeforeRebootUtc=$os.LastBootUpTime.ToUniversalTime().ToString('o')
-            $policyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
-            $policy = Get-ItemProperty -LiteralPath $policyPath -ErrorAction Stop
-            $auPolicy = Get-ItemProperty -LiteralPath ($policyPath + '\AU') -ErrorAction Stop
-            $wsusUri = $null
-            if ($auPolicy.UseWUServer -ne 1 -or
-                -not [uri]::TryCreate([string]$policy.WUServer, [UriKind]::Absolute, [ref]$wsusUri) -or
-                $wsusUri.Scheme -notin @('http', 'https')) {
-                throw 'This workstation is not configured to use a WSUS server. No fallback is allowed.'
-            }
-            $result.WSUSServer = [string]$policy.WUServer
-            $systemInfo = New-Object -ComObject Microsoft.Update.SystemInfo
-            if ($systemInfo.RebootRequired) {
-                $result.Status = 'RebootRequiredBeforeInstall'
-                $result.RebootRequired = $true
-                return
-            }
-            $session = New-Object -ComObject Microsoft.Update.Session
-            $session.ClientApplicationID = 'AD WSUS Workstation Maintenance'
-            $searcher = $session.CreateUpdateSearcher()
-            $searcher.ServerSelection = 1 # ssManagedServer: never public Windows Update.
-            $searcher.Online = $true
-            $result.Status = 'Searching'
-            Save-WorkerResult
-            $search = $searcher.Search("IsInstalled=0 and IsHidden=0 and IsAssigned=1 and Type='Software' and DeploymentAction='Installation'")
-            if ([int]$search.ResultCode -ne 2) { throw "WSUS search did not succeed completely (result $($search.ResultCode))." }
-            $result.Found = $search.Updates.Count
-            $selected = New-Object -ComObject Microsoft.Update.UpdateColl
-            $selectedRows = [Collections.Generic.List[object]]::new()
-            for ($index=0; $index -lt $search.Updates.Count; $index++) {
-                $update = $search.Updates.Item($index)
-                $row = [pscustomobject][ordered]@{
-                    UpdateID=$update.Identity.UpdateID; KB=($update.KBArticleIDs -join ';'); Title=$update.Title
-                    Status='Selected'; HResult=''; RebootRequired=$false
-                }
-                $rows.Add($row)
-                $isUpgrade = $false
-                for ($category=0; $category -lt $update.Categories.Count; $category++) {
-                    if ($update.Categories.Item($category).CategoryID -ieq '3689bdc8-b205-4af4-8d4a-a63924c5e9d5') { $isUpgrade=$true }
-                }
-                if ($isUpgrade) { $row.Status='SkippedFeatureUpgrade'; $result.Skipped++; continue }
-                if ($update.InstallationBehavior.CanRequestUserInput) { $row.Status='SkippedInteractive'; $result.Skipped++; continue }
-                if (-not $update.EulaAccepted) { [void]$update.AcceptEula() }
-                [void]$selected.Add($update)
-                $selectedRows.Add($row)
-            }
-            $result.Selected = $selected.Count
-            if ($selected.Count -eq 0) { $result.Status='NoApplicableUpdates'; return }
-
-            $installer = $session.CreateUpdateInstaller()
-            if ($installer.IsBusy) { throw 'Windows Update is already installing updates. This run will not interfere.' }
-            $result.Status = 'Downloading'
-            Save-WorkerResult
-            $downloader = $session.CreateUpdateDownloader()
-            $downloader.Updates = $selected
-            $download = $downloader.Download()
-            $ready = New-Object -ComObject Microsoft.Update.UpdateColl
-            $readyRows = [Collections.Generic.List[object]]::new()
-            for ($index=0; $index -lt $selected.Count; $index++) {
-                $update = $selected.Item($index)
-                $downloadItem = $download.GetUpdateResult($index)
-                $row = $selectedRows[$index]
-                $row.HResult = '0x{0:X8}' -f $downloadItem.HResult
-                if ([int]$downloadItem.ResultCode -eq 2 -and $update.IsDownloaded) {
-                    $row.Status='Downloaded'
-                    [void]$ready.Add($update)
-                    $readyRows.Add($row)
-                }
-                else { $row.Status='DownloadFailed'; $result.Failed++ }
-            }
-            if ($ready.Count -eq 0) { $result.Status='Failed'; $result.Error='No selected updates downloaded successfully.'; return }
-            # WUA rejects an exclusive update combined with any other update.
-            # Install one such update alone in this pass and retain explicit
-            # deferred results for the remainder, including other exclusives.
-            $exclusiveIndex=-1
-            for ($index=0;$index -lt $ready.Count;$index++) {
-                if ([int]$ready.Item($index).InstallationBehavior.Impact -eq 2) { $exclusiveIndex=$index;break }
-            }
-            if ($exclusiveIndex -ge 0 -and $ready.Count -gt 1) {
-                $exclusive=New-Object -ComObject Microsoft.Update.UpdateColl
-                [void]$exclusive.Add($ready.Item($exclusiveIndex))
-                $exclusiveRow=$readyRows[$exclusiveIndex]
-                for ($index=0;$index -lt $readyRows.Count;$index++) {
-                    if ($index -ne $exclusiveIndex) { $readyRows[$index].Status='DeferredExclusive';$result.Deferred++ }
-                }
-                $ready=$exclusive
-                $readyRows=[Collections.Generic.List[object]]::new()
-                $readyRows.Add($exclusiveRow)
-                $result.Note='Other downloaded updates were deferred for a separate pass because an exclusive update was selected.'
-            }
-            $installer.Updates = $ready
-            $installer.AllowSourcePrompts = $false
-            $installer.ForceQuiet = $true
-            if ($installer.RebootRequiredBeforeInstallation) {
-                $result.Status='RebootRequiredBeforeInstall'; $result.RebootRequired=$true; return
-            }
-            $result.Status = 'Installing'
-            Save-WorkerResult
-            $installation = $installer.Install()
-            for ($index=0; $index -lt $ready.Count; $index++) {
-                $installedItem = $installation.GetUpdateResult($index)
-                $row = $readyRows[$index]
-                $row.HResult = '0x{0:X8}' -f $installedItem.HResult
-                $row.RebootRequired = [bool]$installedItem.RebootRequired
-                if ([int]$installedItem.ResultCode -eq 2) { $row.Status='Installed'; $result.Installed++ }
-                else { $row.Status='InstallFailed'; $result.Failed++ }
-            }
-            $result.RebootRequired = [bool]($installation.RebootRequired -or (New-Object -ComObject Microsoft.Update.SystemInfo).RebootRequired)
-            if ($result.Failed -gt 0 -or [int]$installation.ResultCode -ne 2) {
-                if ($result.Installed -gt 0) { $result.Status='PartialFailure' }
-                else { $result.Status='Failed' }
-                $result.Error = "One or more update operations failed (installation result $($installation.ResultCode))."
-            }
-            elseif ($result.Deferred -gt 0) { $result.Status='MoreUpdatesPending' }
-            else { $result.Status='Installed' }
-        }
-    }
-    catch { $result.Status='Failed'; $result.Error=$_.Exception.Message }
-    finally {
-        try {
-            $updatesPath = Join-Path $Configuration.RunDirectory 'Updates.csv'
-            if ($rows.Count -gt 0) { $rows | Export-Csv -LiteralPath $updatesPath -NoTypeInformation -Encoding UTF8 -ErrorAction Stop }
-            else { '"UpdateID","KB","Title","Status","HResult","RebootRequired"' | Out-File -LiteralPath $updatesPath -Encoding UTF8 -ErrorAction Stop }
-        }
-        catch { $result.Status='Failed'; $result.Error='Cannot write per-update results: ' + $_.Exception.Message }
-        try { Unregister-ScheduledTask -TaskName $Configuration.TaskName -Confirm:$false -ErrorAction Stop }
-        catch { $result.CleanupError=$_.Exception.Message }
-        if ($Configuration.RestartIfNeeded -and $result.RebootRequired -and $result.Failed -eq 0 -and
-            $result.Status -in @('Installed', 'MoreUpdatesPending', 'RebootRequiredBeforeInstall')) { $result.RebootAction='RequestStarting' }
-        $result.Complete = ($result.RebootAction -ne 'RequestStarting')
-        if ($result.Complete) { $result.CompletedUtc = [datetime]::UtcNow.ToString('o') }
-        Save-WorkerResult
-    }
-    if ($result.RebootAction -eq 'RequestStarting') {
-        try {
-            $restartParameters = @{ ComputerName=$Configuration.ExpectedComputerName; Confirm=$false; ErrorAction='Stop' }
-            if ($Configuration.ForceRestart) { $restartParameters['Force']=$true }
-            Restart-Computer @restartParameters
-            $result.RebootAction='Requested'
-        }
-        catch { $result.RebootAction='Failed'; $result.Status='RebootFailed'; $result.Error='Reboot request failed: ' + $_.Exception.Message }
-        $result.Complete=$true
-        $result.CompletedUtc=[datetime]::UtcNow.ToString('o')
-        Save-WorkerResult
-    }
+    if(wait!=0) throw new Win32Exception(Marshal.GetLastWin32Error());
+    uint exit;
+    if(!GetExitCodeProcess(information.process,out exit)) throw new Win32Exception(Marshal.GetLastWin32Error());
+    if(exit!=0) throw new Win32Exception((int)exit,"shutdown.exe exit "+exit+": "+new Win32Exception((int)exit).Message);
+   }
+   finally {
+    if(secret!=IntPtr.Zero) Marshal.ZeroFreeGlobalAllocUnicode(secret);
+    if(information.thread!=IntPtr.Zero) CloseHandle(information.thread);
+    if(information.process!=IntPtr.Zero) CloseHandle(information.process);
+   }
+  }
+ }
+}
+'@ -ErrorAction Stop
 }
 
-function Invoke-WSUSRemoteAction {
-    param([string]$Action, [string]$RunId, [string]$WorkerDefinition, [string]$OptionsJson)
-    Set-StrictMode -Version 2.0
+function Invoke-NativeRestart {
+    param([string]$Address,[string]$Message,[int]$DelaySeconds,[int]$RequestTimeoutSeconds,[pscredential]$Credential)
+    $account=$null;$domain=$null;$password=$null
+    if($null -ne $Credential) {
+        $account=$Credential.UserName;$password=$Credential.Password
+        if($account.Contains('\')){$domain,$account=$account.Split('\',2)}
+        elseif(-not $account.Contains('@')){$domain=[Environment]::UserDomainName}
+    }
+    try{[ADWorkstationMaintenance.NativeShutdown]::Run($Address,$Message,[uint32]$DelaySeconds,$RequestTimeoutSeconds,$account,$domain,$password)}
+    catch {
+        $exception=$_.Exception
+        while($null -ne $exception.InnerException){$exception=$exception.InnerException}
+        if($exception -is [TimeoutException]){return [pscustomobject]@{Status='RequestTimedOut';Detail=$exception.Message}}
+        if($exception -is [ComponentModel.Win32Exception]) {
+            if($exception.NativeErrorCode -eq 1115){return [pscustomobject]@{Status='RestartAlreadyPending';Detail='Windows reports a restart is already pending; it was not replaced.'}}
+            throw ('Shutdown request failed with error {0}: {1}' -f $exception.NativeErrorCode,$exception.Message)
+        }
+        throw
+    }
+    return [pscustomobject]@{Status='RestartRequested';Detail=('shutdown.exe accepted the request for {0}; countdown {1} seconds. Physical reboot is not verified.' -f $Address,$DelaySeconds)}
+}
+
+function Invoke-ComputerMaintenanceTask {
+    param([object]$Item,[object]$Settings)
     $ErrorActionPreference='Stop'
-    $parsedId=[guid]::Empty
-    if (-not [guid]::TryParseExact($RunId, 'N', [ref]$parsedId)) { throw 'Invalid run identifier.' }
-    $taskName='ADWorkstation-WSUS-Updates'
-    $deployingIdentity=[Security.Principal.WindowsIdentity]::GetCurrent().User
-    $root=Join-Path $env:ProgramData ('ADWSUSMaintenance-'+$deployingIdentity.Value)
-    $runDirectory=Join-Path $root $RunId
-    if ($Action -eq 'Collect') {
-        $resultFile=Join-Path $runDirectory 'Result.json'
-        if (Test-Path -LiteralPath $resultFile) {
-            $data=Get-Content -LiteralPath $resultFile -Raw -ErrorAction Stop | ConvertFrom-Json
-            if ($data.RunId -ne $RunId) { throw 'Worker result does not match this run.' }
-            if (-not $data.Complete -and $data.RebootAction -eq 'RequestStarting') {
-                # A successful reboot can terminate PowerShell before the
-                # worker records the return from Restart-Computer. Verify a
-                # later OS boot rather than treating that snapshot as success.
-                $before=[datetime]::Parse($data.BootTimeBeforeRebootUtc,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind)
-                $currentBoot=(Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime.ToUniversalTime()
-                if ($currentBoot -gt $before.AddSeconds(1)) {
-                    $data.RebootAction='RebootObserved';$data.Complete=$true
-                    $data.RebootVerifiedUtc=[datetime]::UtcNow.ToString('o');$data.CompletedUtc=$data.RebootVerifiedUtc
-                    $data.Note=($data.Note+' A later OS boot was observed after the reboot request.').Trim()
-                    $temporary=$resultFile+'.collector.tmp'
-                    [IO.File]::WriteAllText($temporary,($data|ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($true))
-                    [IO.File]::Replace($temporary,$resultFile,[System.Management.Automation.Language.NullString]::Value)
-                }
+    $ipv4=''
+    try {
+        foreach($record in (Resolve-DnsName -Name $Item.Target -Type A_AAAA -DnsOnly -QuickTimeout -ErrorAction Stop)) {
+            if($null -eq $record.PSObject.Properties['IPAddress']){continue}
+            $address=[Net.IPAddress]::Parse([string]$record.IPAddress)
+            if($address.IsIPv4MappedToIPv6){$address=$address.MapToIPv4()}
+            $key=[BitConverter]::ToString($address.GetAddressBytes())
+            if([Net.IPAddress]::IsLoopback($address) -or $key -in $Settings.LocalAddresses) {
+                return [pscustomobject]@{Status='SkippedLocal';Detail='DNS points to the executing computer or a loopback address.';Address=''}
             }
-            return [pscustomobject]@{Status='Result';RunDirectory=$runDirectory;Detail='';Result=$data}
+            if($address.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork -and $ipv4 -eq ''){$ipv4=$address.ToString()}
         }
-        $task=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-        if ($null -ne $task -and [string]$task.State -ne 'Running') {
-            $information=Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction Stop
-            if ($information.LastRunTime -gt [datetime]'2000-01-01' -and $information.LastTaskResult -ne 267011) {
-                return [pscustomobject]@{Status='TaskFailed';RunDirectory=$runDirectory;Detail=('Task stopped without a result; last task code: '+$information.LastTaskResult);Result=$null}
-            }
+        if($ipv4 -eq ''){throw 'DNS returned no IPv4 address. No restart was sent.'}
+        if($Settings.Subnets.Count -gt 0) {
+            $bytes=[Net.IPAddress]::Parse($ipv4).GetAddressBytes()
+            $number=[uint64]$bytes[0]*16777216+[uint64]$bytes[1]*65536+[uint64]$bytes[2]*256+[uint64]$bytes[3]
+            $matched=$false
+            foreach($subnet in $Settings.Subnets){if(($number -band $subnet.Mask) -eq $subnet.Network){$matched=$true;break}}
+            if(-not $matched){return [pscustomobject]@{Status='SkippedSubnet';Detail='Resolved IP is outside the selected subnets.';Address=$ipv4}}
         }
-        return [pscustomobject]@{Status='Pending';RunDirectory=$runDirectory;Detail='No worker result yet.';Result=$null}
     }
-    if ($Action -ne 'Queue') { throw 'Unknown remote action.' }
-    $options=$OptionsJson | ConvertFrom-Json
-    $system=Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
-    $os=Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
-    if ($system.Name -ieq $options.ExcludedComputerName) {
-        return [pscustomobject]@{Status='SkippedLocal';RunDirectory='';Detail='Remote session is the excluded computer.';Result=$null}
+    catch{return [pscustomobject]@{Status='DNSFailed';Detail=$_.Exception.Message;Address=''}}
+    if($Settings.Operation -eq 'Inventory'){return [pscustomobject]@{Status='Ready';Detail='DNS and local-address checks passed.';Address=$ipv4}}
+    try {
+        $outcome=Invoke-NativeRestart -Address $ipv4 -Message $Settings.RestartMessage -DelaySeconds $Settings.RestartDelaySeconds -RequestTimeoutSeconds $Settings.RequestTimeoutSeconds -Credential $Settings.Credential
+        return [pscustomobject]@{Status=$outcome.Status;Detail=$outcome.Detail;Address=$ipv4}
     }
-    if ($null -ne $options.PSObject.Properties['ExcludedComputerNames'] -and $system.Name -in @($options.ExcludedComputerNames)) {
-        return [pscustomobject]@{Status='SkippedExempt';RunDirectory='';Detail='Remote computer matches the exemption list.';Result=$null}
-    }
-    if ($os.ProductType -ne 1 -or $system.Name -notmatch '^U-(LT|WS)' -or $system.Name -ine $options.ExpectedComputerName) {
-        throw 'Remote identity does not match the expected Windows workstation.'
-    }
-    $policy=Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' -ErrorAction Stop
-    $au=Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -ErrorAction Stop
-    if ($au.UseWUServer -ne 1 -or [string]::IsNullOrWhiteSpace($policy.WUServer)) { throw 'Client is not WSUS-managed.' }
-    if ($null -ne (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) {
-        return [pscustomobject]@{Status='ExistingTask';RunDirectory='';Detail='An existing update task must finish or be inspected first.';Result=$null}
-    }
-
-    # Create the payload location with restricted permissions before writing
-    # any script that SYSTEM will execute. Reject untrusted precreated roots.
-    $administrators=[Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
-    $systemSid=[Security.Principal.SecurityIdentifier]::new('S-1-5-18')
-    if (Test-Path -LiteralPath $root) {
-        $directory=Get-Item -LiteralPath $root -Force -ErrorAction Stop
-        if (-not $directory.PSIsContainer -or ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw 'The maintenance directory is not a normal directory.'
-        }
-        $owner=(Get-Acl -LiteralPath $root -ErrorAction Stop).GetOwner([Security.Principal.SecurityIdentifier]).Value
-        if ($owner -notin @($administrators.Value,$systemSid.Value,$deployingIdentity.Value)) { throw 'The maintenance directory has an untrusted owner.' }
-    }
-    $security=[Security.AccessControl.DirectorySecurity]::new()
-    $security.SetAccessRuleProtection($true,$false)
-    $security.SetOwner($deployingIdentity)
-    $inheritance=[Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'
-    foreach ($sid in @($administrators,$systemSid,$deployingIdentity)) {
-        $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
-            $sid,[Security.AccessControl.FileSystemRights]::FullControl,$inheritance,
-            [Security.AccessControl.PropagationFlags]::None,[Security.AccessControl.AccessControlType]::Allow))
-    }
-    [void][IO.Directory]::CreateDirectory($root,$security)
-    [IO.Directory]::SetAccessControl($root,$security)
-    if (Test-Path -LiteralPath $runDirectory) { throw 'Run directory already exists; refusing an uncertain replay.' }
-    [void][IO.Directory]::CreateDirectory($runDirectory,$security)
-    $workerFile=Join-Path $runDirectory 'Worker.ps1'
-    $configFile=Join-Path $runDirectory 'Configuration.json'
-    $configuration=[ordered]@{
-        RunId=$RunId;TaskName=$taskName;RunDirectory=$runDirectory;ExpectedComputerName=$options.ExpectedComputerName
-        ExcludedComputerNames=@($(if ($null -ne $options.PSObject.Properties['ExcludedComputerNames']) { $options.ExcludedComputerNames }));
-        ExcludedComputerName=$options.ExcludedComputerName;RestartIfNeeded=[bool]$options.RestartIfNeeded;ForceRestart=[bool]$options.ForceRestart
-    }
-    [IO.File]::WriteAllText($workerFile,$WorkerDefinition,[Text.UTF8Encoding]::new($true))
-    [IO.File]::WriteAllText($configFile,($configuration|ConvertTo-Json),[Text.UTF8Encoding]::new($true))
-    $workerLiteral="'"+$workerFile.Replace("'","''")+"'"
-    $configLiteral="'"+$configFile.Replace("'","''")+"'"
-    $bootstrap=". ([scriptblock]::Create([IO.File]::ReadAllText($workerLiteral))); Invoke-WSUSUpdateWorker -Configuration (Get-Content -LiteralPath $configLiteral -Raw | ConvertFrom-Json)"
-    $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrap))
-    $executable=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $taskAction=New-ScheduledTaskAction -Execute $executable -Argument ('-NoProfile -NonInteractive -EncodedCommand '+$encoded)
-    $principal=New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-    $settings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([timespan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-    # No trigger and no retry: start just this requested run. Registration is
-    # deliberately not forced, so a concurrent controller cannot replace a job.
-    Register-ScheduledTask -TaskName $taskName -Action $taskAction -Principal $principal -Settings $settings -Description ('WSUS workstation updates; run '+$RunId) -ErrorAction Stop | Out-Null
-    Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
-    return [pscustomobject]@{Status='Queued';RunDirectory=$runDirectory;Detail='Task Scheduler accepted the job; installation is not yet verified.';Result=$null}
+    catch{return [pscustomobject]@{Status='RestartFailed';Detail=$_.Exception.Message;Address=$ipv4}}
 }
 
-
+function Invoke-MaintenanceParallel {
+    param([object[]]$Items,[scriptblock]$ScriptBlock,[object]$Context,[int]$ThrottleLimit=64,[string[]]$FunctionDefinitions=@(),[string[]]$Modules=@())
+    if($Items.Count -eq 0){return}
+    $state=[Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    if($Modules.Count -gt 0){$state.ImportPSModule($Modules)}
+    foreach($definition in $FunctionDefinitions) {
+        $tokens=$null;$errors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseInput($definition,[ref]$tokens,[ref]$errors)
+        if($errors.Count -gt 0){throw 'Invalid parallel worker function definition.'}
+        $node=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst]},$true)
+        $state.Commands.Add([Management.Automation.Runspaces.SessionStateFunctionEntry]::new($node.Name,($node.Body.Extent.Text.Substring(1,$node.Body.Extent.Text.Length-2))))
+    }
+    $pool=[RunspaceFactory]::CreateRunspacePool(1,$ThrottleLimit,$state,$Host)
+    $pool.ApartmentState='MTA';$pool.ThreadOptions='ReuseThread'
+    $active=[Collections.Generic.List[object]]::new();$next=0
+    try {
+        $pool.Open()
+        while($next -lt $Items.Count -or $active.Count -gt 0) {
+            while($next -lt $Items.Count -and $active.Count -lt $ThrottleLimit) {
+                $pipeline=[PowerShell]::Create();$pipeline.RunspacePool=$pool
+                [void]$pipeline.AddScript($ScriptBlock.ToString()).AddArgument($Items[$next]).AddArgument($Context)
+                $handle=$pipeline.BeginInvoke()
+                $active.Add([pscustomobject]@{Pipeline=$pipeline;Handle=$handle;Item=$Items[$next]});$next++
+            }
+            $completed=$false
+            foreach($job in $active.ToArray()) {
+                if(-not $job.Handle.IsCompleted){continue}
+                $result=$null;$failure=''
+                try {
+                    $output=@($job.Pipeline.EndInvoke($job.Handle))
+                    if($job.Pipeline.HadErrors){$failure=($job.Pipeline.Streams.Error|Out-String).Trim()}
+                    elseif($output.Count -eq 1){$result=$output[0]}
+                    elseif($output.Count -gt 1){$result=$output}
+                }
+                catch{$failure=$_.Exception.Message}
+                finally{$job.Pipeline.Dispose();[void]$active.Remove($job)}
+                [pscustomobject]@{Item=$job.Item;Result=$result;Error=$failure}
+                $completed=$true
+            }
+            if(-not $completed -and $active.Count -gt 0){[Threading.Thread]::Sleep(20)}
+        }
+    }
+    finally {
+        foreach($job in $active){try{$job.Pipeline.Stop()}finally{$job.Pipeline.Dispose()}}
+        $pool.Dispose()
+    }
+}
 Set-StrictMode -Version 2.0
 $ErrorActionPreference='Stop'
-
-function Read-YesNo([string]$Prompt,[bool]$Default) {
-    $suffix=' [y/N]';if($Default){$suffix=' [Y/n]'}
-    while($true) {
-        $answer=Read-Host ($Prompt+$suffix)
-        if([string]::IsNullOrWhiteSpace($answer)){return $Default}
-        switch($answer.Trim().ToLowerInvariant()) {
-            'y' {return $true}; 'yes' {return $true}
-            'n' {return $false}; 'no' {return $false}
-            default {Write-Host 'Enter Y or N.'}
-        }
-    }
+function Read-YesNo([string]$Prompt) {
+    while($true){$answer=Read-Host ($Prompt+' [y/N]');if([string]::IsNullOrWhiteSpace($answer)){return $false};switch($answer.Trim().ToLowerInvariant()){'y'{return $true};'yes'{return $true};'n'{return $false};'no'{return $false};default{Write-Host 'Enter Y or N.'}}}
 }
-
 $interactive=-not $PSBoundParameters.ContainsKey('Action')
 if($interactive) {
-    Write-Host 'AD Workstation Maintenance (U-LT* / U-WS*)'
+    Write-Host 'AD Workstation Maintenance — forced reboots'
     Write-Host '  1. Preview eligible computers (default)'
-    Write-Host '  2. Reboot computers only'
-    Write-Host '  3. Install approved WSUS updates; do not request a reboot'
-    Write-Host '  4. Install approved WSUS updates and reboot when needed'
+    Write-Host '  2. Force reboot computers'
     Write-Host '  0. Exit'
     while([string]::IsNullOrWhiteSpace($Action)) {
-        $choice=Read-Host 'Choose an operation [1]'
-        if([string]::IsNullOrWhiteSpace($choice)){$choice='1'}
-        switch($choice.Trim()) {
-            '0' {return}
-            '1' {$Action='Preview'}
-            '2' {$Action='Restart'}
-            '3' {$Action='InstallUpdates'}
-            '4' {$Action='InstallUpdatesAndRestart'}
-            default {Write-Host 'Enter 0, 1, 2, 3 or 4.'}
-        }
+        $choice=Read-Host 'Choose an operation [1]';if([string]::IsNullOrWhiteSpace($choice)){$choice='1'}
+        switch($choice.Trim()){'0'{return};'1'{$Action='Preview'};'2'{$Action='Restart'};default{Write-Host 'Enter 0, 1 or 2.'}}
     }
+    if(-not $PSBoundParameters.ContainsKey('ComputerName')){$names=Read-Host 'Only these computers (comma separated; Enter for all matching AD computers)';if(-not [string]::IsNullOrWhiteSpace($names)){$ComputerName=@($names)}}
     $extra=Read-Host 'Additional computers to exempt (comma separated; Enter for none)'
     if(-not [string]::IsNullOrWhiteSpace($extra)){$ExcludeComputer=@($ExcludeComputer)+@($extra)}
-    if($Action -ne 'Preview' -and $null -eq $Credential -and (Read-YesNo 'Use alternate credentials for remote operations? AD uses the launch identity.' $false)) {
-        $Credential=Get-Credential -Message 'Enter an account permitted to administer the target workstations.'
-        if($null -eq $Credential){throw 'Credential entry was cancelled. No maintenance was started.'}
+    if($Action -eq 'Restart' -and $null -eq $Credential -and (Read-YesNo 'Supply remote credentials? AD uses the launch identity.')) {
+        $Credential=Get-Credential -Message 'Enter the remote shutdown account (DOMAIN\username or user@domain).'
+        if($null -eq $Credential){throw 'Credential entry was cancelled. No restart was requested.'}
     }
-    if($Action -in @('Restart','InstallUpdatesAndRestart') -and -not $PSBoundParameters.ContainsKey('ForceRestart')) {
-        $ForceRestart=Read-YesNo 'Force restarts? Unsaved work may be lost.' $true
-    }
-    if($Action -in @('InstallUpdates','InstallUpdatesAndRestart') -and -not $PSBoundParameters.ContainsKey('Wait')) {
-        $Wait=Read-YesNo 'Wait for update results?' $true
+    if($Action -eq 'Restart' -and -not $PSBoundParameters.ContainsKey('RestartDelaySeconds')) {
+        while($true){$delay=Read-Host 'Countdown in seconds; 0 is immediate [300]';if([string]::IsNullOrWhiteSpace($delay)){$RestartDelaySeconds=300;break};$parsed=0;if([int]::TryParse($delay,[ref]$parsed) -and $parsed -ge 0 -and $parsed -le 86400){$RestartDelaySeconds=$parsed;break};Write-Host 'Enter a number from 0 through 86400.'}
     }
 }
-$install=$Action -in @('InstallUpdates','InstallUpdatesAndRestart')
-$restartIfNeeded=$Action -eq 'InstallUpdatesAndRestart'
-$forceRestartEnabled=[bool]($ForceRestart -and ($restartIfNeeded -or $Action -eq 'Restart'))
-if($Wait -and -not $install){throw '-Wait is only valid for update operations.'}
-if($Action -eq 'Restart') {
-    $restartCommand=Get-Command Restart-Computer -ErrorAction Stop
-    foreach($parameterName in @('ComputerName','Protocol','Credential','Force')) {
-        if(-not $restartCommand.Parameters.ContainsKey($parameterName)) {
-            throw ("The resolved Restart-Computer command does not support -{0}. Use Windows PowerShell 5.1 (powershell.exe) and check Get-Command Restart-Computer -All for a conflicting function or module." -f $parameterName)
-        }
-    }
+if(-not $PSBoundParameters.ContainsKey('RestartMessage')){$RestartMessage='Your computer will restart in {0} seconds to support maintenance. Please save your work.' -f $RestartDelaySeconds}
+function New-NameSet([string[]]$Entries) {
+    $set=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach($entry in $Entries){foreach($part in ($entry -split '[,;\r\n]+')){
+        if([string]::IsNullOrWhiteSpace($part)){continue};$name=$part.Trim().TrimEnd('.')
+        if($name.Length -gt 253 -or $name -notmatch '^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$'){throw "Invalid computer name '$part'. Use exact names without wildcards."}
+        [void]$set.Add($name);[void]$set.Add($name.Split('.')[0])
+    }}
+    return ,$set
 }
-
-$exemptNames=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-foreach($entry in $ExcludeComputer) {
-    foreach($part in ($entry -split '[,;\r\n]+')) {
-        if([string]::IsNullOrWhiteSpace($part)){continue}
-        $name=$part.Trim().TrimEnd('.')
-        if($name.Length -gt 253 -or $name -notmatch '^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$') {
-            throw "Invalid exempt computer name '$part'. Use exact short names or FQDNs, without wildcards."
-        }
-        [void]$exemptNames.Add($name)
-        [void]$exemptNames.Add($name.Split('.')[0])
-    }
-}
-function Test-ExemptName([string]$Name) {
-    if([string]::IsNullOrWhiteSpace($Name)){return $false}
-    $normalized=$Name.TrimEnd('.')
-    return ($exemptNames.Contains($normalized) -or $exemptNames.Contains($normalized.Split('.')[0]))
+function Test-NameSet([string]$Name,[object]$Set) {
+    if([string]::IsNullOrWhiteSpace($Name)){return $false};$name=$Name.TrimEnd('.')
+    return ($Set.Contains($name) -or $Set.Contains($name.Split('.')[0]))
 }
 function Get-AddressKey([Net.IPAddress]$Address) {
-    if($Address.IsIPv4MappedToIPv6){$Address=$Address.MapToIPv4()}
-    return [BitConverter]::ToString($Address.GetAddressBytes())
+    if($Address.IsIPv4MappedToIPv6){$Address=$Address.MapToIPv4()};return [BitConverter]::ToString($Address.GetAddressBytes())
 }
-function Test-LocalName([string]$Name) {
-    if([string]::IsNullOrWhiteSpace($Name)){return $false}
-    $normalized=$Name.TrimEnd('.')
-    return ($Name -eq '.' -or $normalized -ieq 'localhost' -or $localNames.Contains($normalized) -or $localNames.Contains($normalized.Split('.')[0]))
+$included=New-NameSet $ComputerName;$exempt=New-NameSet $ExcludeComputer
+$subnets=@()
+foreach($cidr in $Subnet) {
+    $parts=$cidr.Split('/');$address=$null;$prefix=0
+    if($parts.Count -ne 2 -or -not [Net.IPAddress]::TryParse($parts[0],[ref]$address) -or $address.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork -or -not [int]::TryParse($parts[1],[ref]$prefix) -or $prefix -lt 0 -or $prefix -gt 32){throw "Invalid IPv4 CIDR '$cidr'. Example: 192.0.2.0/24."}
+    $bytes=$address.GetAddressBytes();$number=[uint64]$bytes[0]*16777216+[uint64]$bytes[1]*65536+[uint64]$bytes[2]*256+[uint64]$bytes[3]
+    $mask=[uint64]4294967295-([uint64][math]::Pow(2,32-$prefix)-1)
+    $subnets+=[pscustomobject]@{Network=($number -band $mask);Mask=$mask}
 }
-function Test-LocalDnsTarget([string]$Target) {
-    $found=$false
-    foreach($record in (Resolve-DnsName -Name $Target -Type A_AAAA -DnsOnly -QuickTimeout -ErrorAction Stop)) {
-        if($null -eq $record.PSObject.Properties['IPAddress']){continue}
-        $address=[Net.IPAddress]::Parse([string]$record.IPAddress)
-        if($address.IsIPv4MappedToIPv6){$address=$address.MapToIPv4()}
-        $found=$true
-        if([Net.IPAddress]::IsLoopback($address) -or $localAddresses.Contains((Get-AddressKey $address))){return $true}
-    }
-    if(-not $found){throw 'DNS returned no IP addresses.'}
-    return $false
-}
-function Write-ControllerLog([object]$Computer,[string]$Target,[string]$Status,[string]$Detail,[string]$RunDirectory='', [object]$Summary=$null) {
-    $installed='';$failed='';$deferred='';$rebootRequired='';$rebootAction=''
-    if($null -ne $Summary){$installed=$Summary.Installed;$failed=$Summary.Failed;$deferred=$Summary.Deferred;$rebootRequired=$Summary.RebootRequired;$rebootAction=$Summary.RebootAction}
-    $row=[pscustomobject][ordered]@{
-        TimestampUtc=[datetime]::UtcNow.ToString('o');ComputerName=$Computer.Name;Target=$Target;RunId=$runId
-        Action=$Action;ForceRestart=$forceRestartEnabled;Protocol=$Protocol;Status=$Status;Installed=$installed;Failed=$failed
-        Deferred=$deferred;RebootRequired=$rebootRequired;RebootAction=$rebootAction;RunDirectory=$RunDirectory;Detail=$Detail
-    }
-    $writer.WriteLine(($row|ConvertTo-Csv -NoTypeInformation)[1]);$writer.Flush();$logStream.Flush($true)
-    Write-Host ('{0}: {1}' -f $Computer.Name,$Status)
-}
-
 $localMachine=[Environment]::MachineName
-if([string]::IsNullOrWhiteSpace($localMachine)){throw 'Cannot determine local computer identity.'}
-$localNames=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-[void]$localNames.Add($localMachine)
-$hostName=[Net.Dns]::GetHostName().TrimEnd('.')
-[void]$localNames.Add($hostName);[void]$localNames.Add($hostName.Split('.')[0])
-$networkProperties=[Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties()
-if(-not [string]::IsNullOrWhiteSpace($networkProperties.HostName)) {
-    [void]$localNames.Add($networkProperties.HostName)
-    if(-not [string]::IsNullOrWhiteSpace($networkProperties.DomainName)){[void]$localNames.Add($networkProperties.HostName+'.'+$networkProperties.DomainName)}
-}
+if([string]::IsNullOrWhiteSpace($localMachine)){throw 'Cannot determine the executing computer identity.'}
+$localNames=New-NameSet @($localMachine,[Net.Dns]::GetHostName(),'localhost')
 $localAddresses=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-foreach($adapter in [Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
-    foreach($address in $adapter.GetIPProperties().UnicastAddresses){[void]$localAddresses.Add((Get-AddressKey $address.Address))}
-}
-[void]$localAddresses.Add((Get-AddressKey ([Net.IPAddress]::Any)))
-[void]$localAddresses.Add((Get-AddressKey ([Net.IPAddress]::IPv6Any)))
+foreach($adapter in [Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()){foreach($address in $adapter.GetIPProperties().UnicastAddresses){[void]$localAddresses.Add((Get-AddressKey $address.Address))}}
+[void]$localAddresses.Add((Get-AddressKey ([Net.IPAddress]::Any)));[void]$localAddresses.Add((Get-AddressKey ([Net.IPAddress]::IPv6Any)))
 Import-Module ActiveDirectory -ErrorAction Stop
-$connection=@{ErrorAction='Stop'}
-if($PSBoundParameters.ContainsKey('Server')){$connection['Server']=$Server}
+$connection=@{ErrorAction='Stop'};if($PSBoundParameters.ContainsKey('Server')){$connection['Server']=$Server}
 $rootDse=Get-ADRootDSE @connection
 if([string]::IsNullOrWhiteSpace($rootDse.dnsHostName) -or [string]::IsNullOrWhiteSpace($rootDse.defaultNamingContext)){throw 'AD did not return a controller and domain root.'}
 $connection['Server']=$rootDse.dnsHostName
 if(-not $PSBoundParameters.ContainsKey('SearchBase')){$SearchBase=$rootDse.defaultNamingContext}
-# Finish inventory before sending any maintenance request.
-$computers=@(Get-ADComputer -Filter 'Enabled -eq $true -and (Name -like "U-LT*" -or Name -like "U-WS*")' `
-    -SearchBase $SearchBase -SearchScope Subtree -Properties DNSHostName,OperatingSystem @connection | Sort-Object Name)
-$runId=[guid]::NewGuid().ToString('N')
-$remoteParameters=@{ErrorAction='Stop'}
-if($install) {
-    $workerDefinition="function Invoke-WSUSUpdateWorker {`r`n"+${function:Invoke-WSUSUpdateWorker}.ToString()+"`r`n}"
-    $remoteAction=${function:Invoke-WSUSRemoteAction}
-    $remoteParameters['SessionOption']=New-PSSessionOption -OpenTimeout 15000 -OperationTimeout 30000
-}
-if($null -ne $Credential){$remoteParameters['Credential']=$Credential}
+$computers=@(Get-ADComputer -Filter 'Enabled -eq $true -and (Name -like "U-LT*" -or Name -like "U-WS*")' -SearchBase $SearchBase -SearchScope Subtree -Properties DNSHostName,OperatingSystem @connection|Sort-Object Name)
+$definitions=@();foreach($name in @('Invoke-NativeRestart','Invoke-ComputerMaintenanceTask')){$definitions+=('function '+$name+" {`r`n"+(Get-Item -LiteralPath ('Function:\'+$name)).Definition+"`r`n}")}
+$settings=[pscustomobject]@{Operation='Inventory';LocalAddresses=@($localAddresses);Subnets=@($subnets);Credential=$Credential;RestartMessage=$RestartMessage;RestartDelaySeconds=$RestartDelaySeconds;RequestTimeoutSeconds=$RequestTimeoutSeconds}
+$parallel=@{ScriptBlock={param($Item,$Settings) Invoke-ComputerMaintenanceTask -Item $Item -Settings $Settings};ThrottleLimit=$ThrottleLimit;FunctionDefinitions=$definitions;Modules=@('DnsClient')}
 $logAbsolute=$ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LogPath)
 if([IO.Path]::GetExtension($logAbsolute) -ine '.csv'){throw 'LogPath must end in .csv.'}
-$logStream=[IO.File]::Open($logAbsolute,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
-$writer=$null
-$seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-$eligible=[Collections.Generic.List[object]]::new()
-$queued=[Collections.Generic.List[object]]::new()
-$requestedCount=0;$failedCount=0
+$stream=[IO.File]::Open($logAbsolute,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read);$writer=$null
+function Write-RestartLog([object]$Entry,[string]$Status,[string]$Detail,[string]$Address='') {
+    $row=[pscustomobject][ordered]@{TimestampUtc=[datetime]::UtcNow.ToString('o');ComputerName=$Entry.Computer.Name;Target=$Entry.Target;IPv4=$Address;Action=$Action;CountdownSeconds=$RestartDelaySeconds;Status=$Status;Detail=$Detail}
+    $writer.WriteLine(($row|ConvertTo-Csv -NoTypeInformation)[1]);$writer.Flush();Write-Host ('{0}: {1}' -f $Entry.Computer.Name,$Status)
+}
+$candidates=[Collections.Generic.List[object]]::new();$eligible=[Collections.Generic.List[object]]::new();$seen=New-NameSet @();$requested=0;$failed=0
 try {
-    $writer=[IO.StreamWriter]::new($logStream,[Text.UTF8Encoding]::new($true))
-    $writer.WriteLine('"TimestampUtc","ComputerName","Target","RunId","Action","ForceRestart","Protocol","Status","Installed","Failed","Deferred","RebootRequired","RebootAction","RunDirectory","Detail"')
-    $writer.Flush();$logStream.Flush($true)
-    Write-Host ('Always excluded: {0}. AD search base: {1}' -f $localMachine,$SearchBase)
-    if($exemptNames.Count -gt 0){Write-Host ('Additional exemptions: '+(($exemptNames|Sort-Object)-join ', '))}
+    $writer=[IO.StreamWriter]::new($stream,[Text.UTF8Encoding]::new($true));$writer.WriteLine('"TimestampUtc","ComputerName","Target","IPv4","Action","CountdownSeconds","Status","Detail"');$writer.Flush()
+    Write-Host ('Always excluded: {0}. Parallel workers: {1}. Request timeout: {2} seconds.' -f $localMachine,$ThrottleLimit,$RequestTimeoutSeconds)
     foreach($computer in $computers) {
         if(-not $computer.Enabled -or -not ($computer.Name -like 'U-LT*' -or $computer.Name -like 'U-WS*')){continue}
-        $target=[string]$computer.DNSHostName
-        if([string]::IsNullOrWhiteSpace($target)){$target=[string]$computer.Name}
-        $target=$target.TrimEnd('.')
-        if((Test-LocalName $computer.Name) -or (Test-LocalName $target)){Write-ControllerLog $computer $target 'SkippedLocal' 'Hostname matches local computer.';continue}
-        if((Test-ExemptName $computer.Name) -or (Test-ExemptName $target)){Write-ControllerLog $computer $target 'SkippedExempt' 'Computer matches the exemption list.';continue}
-        if($computer.OperatingSystem -like '*Server*'){Write-ControllerLog $computer $target 'SkippedServer' 'Known server account.';continue}
-        if([string]::IsNullOrWhiteSpace($target) -or $target -match '[\s\\/]'){Write-ControllerLog $computer $target 'InvalidTarget' 'No usable hostname.';continue}
-        if(-not $seen.Add($target)){Write-ControllerLog $computer $target 'SkippedDuplicate' 'Target already processed.';continue}
-        try{$isLocal=Test-LocalDnsTarget $target}
-        catch{Write-ControllerLog $computer $target 'DNSFailed' $_.Exception.Message;continue}
-        if($isLocal){Write-ControllerLog $computer $target 'SkippedLocal' 'DNS points to a local address.';continue}
-        $eligible.Add([pscustomobject]@{Computer=$computer;Target=$target})
-        if($Action -eq 'Preview'){Write-ControllerLog $computer $target 'EligiblePreview' 'No maintenance requested; no update scan performed.'}
-        else{Write-ControllerLog $computer $target 'Eligible' 'Target passed inventory checks.'}
+        $target=[string]$computer.DNSHostName;if([string]::IsNullOrWhiteSpace($target)){$target=[string]$computer.Name};$target=$target.TrimEnd('.')
+        $entry=[pscustomobject]@{Computer=$computer;Target=$target}
+        if($included.Count -gt 0 -and -not ((Test-NameSet $computer.Name $included) -or (Test-NameSet $target $included))){continue}
+        if((Test-NameSet $computer.Name $localNames) -or (Test-NameSet $target $localNames)){Write-RestartLog $entry 'SkippedLocal' 'Hostname matches the executing computer.';continue}
+        if((Test-NameSet $computer.Name $exempt) -or (Test-NameSet $target $exempt)){Write-RestartLog $entry 'SkippedExempt' 'Computer matches the exemption list.';continue}
+        if($computer.OperatingSystem -like '*Server*'){Write-RestartLog $entry 'SkippedServer' 'AD identifies a server operating system.';continue}
+        if([string]::IsNullOrWhiteSpace($target) -or $target -match '[\s\\/]'){Write-RestartLog $entry 'InvalidTarget' 'AD did not provide a usable hostname.';continue}
+        if(-not $seen.Add($target)){Write-RestartLog $entry 'SkippedDuplicate' 'This target was already processed.';continue}
+        $candidates.Add($entry)
     }
-    Write-Host ('Operation: {0}. Eligible targets: {1}. Forced restarts: {2}.' -f $Action,$eligible.Count,$forceRestartEnabled)
-    if($eligible.Count -gt 0) {
-        $eligible|ForEach-Object{[pscustomobject]@{ComputerName=$_.Computer.Name;Target=$_.Target}}|Format-Table -AutoSize|Out-Host
+    Invoke-MaintenanceParallel -Items $candidates.ToArray() -Context $settings @parallel|ForEach-Object {
+        $entry=$_.Item;$reply=$_.Result
+        if($_.Error -ne ''){Write-RestartLog $entry 'InventoryFailed' $_.Error}
+        elseif($reply.Status -eq 'Ready'){$eligible.Add($entry);$status='Eligible';if($Action -eq 'Preview'){$status='EligiblePreview'};Write-RestartLog $entry $status $reply.Detail $reply.Address}
+        else{Write-RestartLog $entry $reply.Status $reply.Detail $reply.Address}
     }
-    $cancelled=$false
-    if($interactive -and $Action -ne 'Preview' -and $eligible.Count -gt 0 -and -not $WhatIfPreference) {
-        if($forceRestartEnabled){Write-Host 'Forced restarts can discard unsaved work.'}
-        $confirmation=Read-Host 'Type RUN to perform this operation on all listed computers; Enter cancels'
-        $cancelled=($null -eq $confirmation -or $confirmation.Trim() -ine 'RUN')
-        # The typed batch confirmation replaces default per-target prompts.
-        # Explicit -Confirm still requests the standard PowerShell prompts.
-        if(-not $cancelled -and -not $PSBoundParameters.ContainsKey('Confirm')){$ConfirmPreference='None'}
+    Write-Host ('Eligible: {0}. Countdown: {1} seconds. Forced restarts may discard unsaved work.' -f $eligible.Count,$RestartDelaySeconds)
+    if($eligible.Count -gt 0){$eligible|Sort-Object {$_.Computer.Name}|ForEach-Object{[pscustomobject]@{ComputerName=$_.Computer.Name;Target=$_.Target}}|Format-Table -AutoSize|Out-Host}
+    $approved=$false
+    if($Action -eq 'Restart' -and $eligible.Count -gt 0) {
+        $cancelled=$false
+        if($interactive -and -not $WhatIfPreference){$answer=Read-Host 'Type RUN to force reboot every listed computer; Enter cancels';$cancelled=($null -eq $answer -or $answer.Trim() -ine 'RUN');if(-not $cancelled -and -not $PSBoundParameters.ContainsKey('Confirm')){$ConfirmPreference='None'}}
+        if(-not $cancelled){$approved=$PSCmdlet.ShouldProcess(($eligible.Count.ToString()+' listed workstations'),('Dispatch parallel shutdown.exe /r /f requests with '+$RestartDelaySeconds+' second countdown'))}
+        if(-not $approved){$status='Declined';if($cancelled){$status='Cancelled'};if($WhatIfPreference){$status='WhatIf'};foreach($entry in $eligible){Write-RestartLog $entry $status 'No restart request was sent.'}}
     }
-    foreach($entry in $eligible) {
-        $computer=$entry.Computer;$target=$entry.Target
-        if($Action -eq 'Preview'){continue}
-        if($cancelled){Write-ControllerLog $computer $target 'Cancelled' 'Batch confirmation was not supplied.';continue}
-        $description='Request computer restart'
-        if($install){$description='Install approved WSUS software updates in a SYSTEM task'}
-        if($restartIfNeeded){$description+=' and restart when needed'}
-        if($forceRestartEnabled){$description+='; forced restart can discard unsaved work'}
-        if(-not $PSCmdlet.ShouldProcess($target,$description)) {
-            $status='Declined';if($WhatIfPreference){$status='WhatIf'}
-            Write-ControllerLog $computer $target $status 'No maintenance request was sent.';continue
+    if($approved) {
+        Initialize-NativeShutdown;$settings.Operation='Restart'
+        Write-Host 'Dispatching parallel shutdown.exe requests; reboot completion is not awaited.'
+        Invoke-MaintenanceParallel -Items $eligible.ToArray() -Context $settings @parallel|ForEach-Object {
+            $entry=$_.Item;$reply=$_.Result
+            if($_.Error -ne ''){$failed++;Write-RestartLog $entry 'DispatchFailed' ($_.Error+' Request outcome is uncertain; inspect the target before retrying.')}
+            else{Write-RestartLog $entry $reply.Status $reply.Detail $reply.Address;if($reply.Status -in @('RestartRequested','RestartAlreadyPending')){$requested++}elseif($reply.Status -in @('RestartFailed','RequestTimedOut','DNSFailed')){$failed++}}
         }
-        try{$isLocal=Test-LocalDnsTarget $target}
-        catch{Write-ControllerLog $computer $target 'DNSFailed' $_.Exception.Message;continue}
-        if($isLocal){Write-ControllerLog $computer $target 'SkippedLocal' 'DNS now points to a local address.';continue}
-        if(-not $install) {
-            $restartParameters=@{ComputerName=$target;Protocol=$Protocol;ErrorAction='Stop';Confirm=$false}
-            if($forceRestartEnabled){$restartParameters['Force']=$true}
-            if($null -ne $Credential){$restartParameters['Credential']=$Credential}
-            Write-ControllerLog $computer $target 'RestartStarting' 'Restart request is about to be sent.'
-            $requestError=$null
-            try{Restart-Computer @restartParameters}catch{$requestError=$_}
-            if($null -ne $requestError){$failedCount++;Write-ControllerLog $computer $target 'RestartFailed' $requestError.Exception.Message;continue}
-            $requestedCount++
-            Write-ControllerLog $computer $target 'RestartRequested' 'Request returned without error; reboot completion is not verified.'
-            continue
-        }
-        $options=[ordered]@{
-            ExpectedComputerName=$computer.Name;ExcludedComputerName=$localMachine
-            ExcludedComputerNames=@($exemptNames);RestartIfNeeded=[bool]$restartIfNeeded;ForceRestart=$forceRestartEnabled
-        }|ConvertTo-Json -Compress
-        Write-ControllerLog $computer $target 'QueueStarting' 'Remote queue request is about to be sent.'
-        $queueError=$null;$reply=$null
-        try{$reply=Invoke-Command -ComputerName $target -ScriptBlock $remoteAction -ArgumentList @('Queue',$runId,$workerDefinition,$options) @remoteParameters}
-        catch{$queueError=$_}
-        if($null -ne $queueError){Write-ControllerLog $computer $target 'QueueFailed' ($queueError.Exception.Message+' Inspect the task before retrying an uncertain request.');continue}
-        Write-ControllerLog $computer $target $reply.Status $reply.Detail $reply.RunDirectory
-        if($reply.Status -eq 'Queued'){$queued.Add([pscustomobject]@{Computer=$computer;Target=$target;RunDirectory=$reply.RunDirectory;LastPhase='';LastError=''})}
-    }
-    if ($Wait -and $queued.Count -gt 0) {
-        $deadline=[datetime]::UtcNow.AddMinutes($TimeoutMinutes)
-        $pending=[Collections.Generic.List[object]]::new()
-        foreach ($job in $queued) {$pending.Add($job)}
-        while ($pending.Count -gt 0 -and [datetime]::UtcNow -lt $deadline) {
-            foreach ($job in $pending.ToArray()) {
-                if ([datetime]::UtcNow -ge $deadline) {break}
-                $reply=$null
-                try {$reply=Invoke-Command -ComputerName $job.Target -ScriptBlock $remoteAction -ArgumentList @('Collect',$runId,'','') @remoteParameters}
-                catch {$job.LastError=$_.Exception.Message;continue}
-                if ($reply.Status -eq 'TaskFailed') {
-                    Write-ControllerLog $job.Computer $job.Target 'TaskFailed' $reply.Detail $job.RunDirectory
-                    [void]$pending.Remove($job);continue
-                }
-                if ($null -ne $reply.Result) {
-                    $summary=$reply.Result
-                    if ($summary.RunId -ne $runId) {throw 'Collected result belongs to another run.'}
-                    if ($summary.Complete) {
-                        $detail=($summary.Note+' '+$summary.Error+' '+$summary.CleanupError).Trim()
-                        Write-ControllerLog $job.Computer $job.Target $summary.Status $detail $job.RunDirectory $summary
-                        [void]$pending.Remove($job)
-                    }
-                    elseif ($job.LastPhase -ne $summary.Status) {
-                        $job.LastPhase=$summary.Status
-                        Write-ControllerLog $job.Computer $job.Target $summary.Status 'Worker still running.' $job.RunDirectory $summary
-                    }
-                }
-            }
-            if ($pending.Count -gt 0) {
-                $remainingMilliseconds=[math]::Max(0,($deadline-[datetime]::UtcNow).TotalMilliseconds)
-                if ($remainingMilliseconds -gt 0) {Start-Sleep -Milliseconds ([int][math]::Min(10000,$remainingMilliseconds))}
-            }
-        }
-        foreach ($job in $pending) {Write-ControllerLog $job.Computer $job.Target 'TrackingTimedOut' ('Installation was not cancelled. Last collection error: '+$job.LastError) $job.RunDirectory}
     }
 }
-finally{if($null -ne $writer){$writer.Dispose()};$logStream.Dispose()}
-Write-Host ('Eligible: {0}; restart requests accepted: {1}; restart requests failed: {2}; update jobs queued: {3}.' -f $eligible.Count,$requestedCount,$failedCount,$queued.Count)
-Write-Host ('Controller log: '+$logAbsolute)
-if($Action -eq 'Preview'){Write-Host 'Preview complete. No maintenance was requested.'}
+finally{if($null -ne $writer){$writer.Dispose()};$stream.Dispose()}
+Write-Host ('Finished dispatch: {0} accepted/already pending; {1} failed or uncertain. Log: {2}' -f $requested,$failed,$logAbsolute)
+if($Action -eq 'Preview'){Write-Host 'Preview only. No reboot requests were sent.'}
