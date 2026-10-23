@@ -1,12 +1,14 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-Previews or dispatches concurrent forced restarts to Active Directory workstations.
+Previews, forces, or cancels pending reboots on Active Directory workstations.
 .DESCRIPTION
 Run in Windows PowerShell 5.1 (powershell.exe). The interactive menu contains
-Preview and Force reboot. Enabled U-LT* and U-WS* accounts are selected from
+Preview, Force reboot, and Cancel pending reboot. Enabled U-LT* and U-WS*
+accounts are selected from
 AD using the identity running the script. Optional credentials apply only
-to outbound reboot requests. Passwords are not saved or put on a command line.
+to outbound reboot/cancellation requests. The menu defaults alternate
+credentials to Yes. Passwords are not saved or put on a command line.
 
 Reboots use actual shutdown.exe /m \\IPv4 /r /f /t 300 commands, with an
 adjustable countdown and warning. There are 64 concurrent workers by default.
@@ -14,6 +16,11 @@ Slow requests occupy individual slots; completed results are processed without
 waiting for earlier targets. RequestTimeoutSeconds limits each shutdown.exe
 process, not the countdown. A timeout is uncertain: a client may already have
 accepted the request. No automatic retries are made.
+Cancellation uses shutdown.exe /m \\IPv4 /a through the same parallel workers.
+It can cancel any pending Windows shutdown on the selected computers while
+the countdown is active. It cannot reverse a reboot that has already started,
+including an immediate reboot with a zero-second countdown. No pending reboot
+is logged separately from a successful cancellation.
 
 The executing computer is always excluded by hostname and all local IPs.
 Additional exemptions accept exact short names/FQDNs, ignoring case. Known
@@ -29,19 +36,24 @@ access and the Force shutdown from a remote system user right are required.
 Moving to a server alone does not bypass blocked network paths. This script
 does not change firewall, routing, Group Policy, or network configuration.
 Reboot-only requires neither WMI nor WinRM.
+At startup the script checks the local OS. A workstation OS displays a warning
+popup about possible cross-subnet failures; server OSes do not. If the session
+cannot display a window, the warning is printed in the console instead.
 
 Forced restarts can discard unsaved work after the countdown. Default delay
 is 300 seconds; zero is immediate. RestartRequested records that shutdown.exe
 returned success, not that a physical reboot occurred. Already-pending reboot
 requests are recorded separately, without cancelling or replacing them.
 
-The menu requires RUN before dispatch. Explicit -Action Restart uses one
+The menu asks Are you SURE? before dispatch, defaulting to No. Explicit
+-Action Restart or -Action CancelRestart uses one
 batch confirmation; -Confirm:$false suppresses it. -WhatIf writes inventory
 and the CSV without sending reboot requests. Existing CSVs are not overwritten.
 AD/logging failures stop the operation; individual request failures are logged.
 
 .PARAMETER Action
-Preview or Restart. Omit for the interactive menu. Restart always forces closure.
+Preview, Restart, or CancelRestart. Omit for the interactive menu.
+Restart always forces closure; CancelRestart aborts pending shutdowns.
 .PARAMETER ComputerName
 Optional exact short names/FQDNs to include. Other targeting/exemption rules apply.
 .PARAMETER ExcludeComputer
@@ -50,6 +62,7 @@ Additional exact computer names/FQDNs to exempt. Arrays or comma-separated lists
 Optional IPv4 CIDRs to include, such as 192.0.2.0/24. Does not change routing.
 .PARAMETER Credential
 Optional remote PSCredential. AD discovery always uses the launch identity.
+The interactive credential question defaults to Yes.
 .PARAMETER ThrottleLimit
 Maximum parallel workers. Default 64; range 1-256.
 .PARAMETER RestartDelaySeconds
@@ -77,10 +90,13 @@ Dispatches concurrent requests to the selected subnet with a five-minute warning
 .EXAMPLE
 .\Invoke-ADWorkstationMaintenance.ps1 -Action Restart -RestartDelaySeconds 0 -WhatIf
 Previews immediate forced restart requests without sending them.
+.EXAMPLE
+.\Invoke-ADWorkstationMaintenance.ps1 -Action CancelRestart -ComputerName U-LT001 -Credential (Get-Credential)
+Cancels a pending reboot on one selected workstation after confirmation.
 #>
 [CmdletBinding(SupportsShouldProcess=$true,ConfirmImpact='High')]
 param(
-    [ValidateSet('Preview','Restart')][string]$Action,
+    [ValidateSet('Preview','Restart','CancelRestart')][string]$Action,
     [string[]]$ComputerName=@(),
     [string[]]$ExcludeComputer=@(),
     [string[]]$Subnet=@(),
@@ -98,7 +114,7 @@ if($PSVersionTable.PSEdition -ne 'Desktop') {
 }
 
 function Initialize-NativeShutdown {
-    if('ADWorkstationMaintenance.NativeShutdown' -as [type]){return}
+    if('ADWorkstationMaintenance.RebootNativeV2' -as [type]){return}
     Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
@@ -110,7 +126,7 @@ using System.Runtime.InteropServices;
 using System.Security;
 using System.Text;
 namespace ADWorkstationMaintenance {
- public static class NativeShutdown {
+ public static class RebootNativeV2 {
   [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)]
   struct StartupInfo {
    public int cb; public string reserved,desktop,title; public int x,y,xSize,ySize,xChars,yChars,fill,flags;
@@ -136,7 +152,14 @@ namespace ADWorkstationMaintenance {
   public static string BuildArguments(string target,string message,uint delay) {
    return "/m \\\\"+target+" /r /f /t "+delay+" /d p:4:2 /c "+Quote(message);
   }
+  public static string BuildCancelArguments(string target) { return "/m \\\\"+target+" /a"; }
   public static void Run(string target,string message,uint delay,int timeoutSeconds,string user,string domain,SecureString password) {
+   RunCore(target,message,delay,timeoutSeconds,user,domain,password,false);
+  }
+  public static void Cancel(string target,int timeoutSeconds,string user,string domain,SecureString password) {
+   RunCore(target,"",0,timeoutSeconds,user,domain,password,true);
+  }
+  static void RunCore(string target,string message,uint delay,int timeoutSeconds,string user,string domain,SecureString password,bool cancel) {
    IPAddress address;
    if(!IPAddress.TryParse(target,out address) || address.AddressFamily!=System.Net.Sockets.AddressFamily.InterNetwork ||
       IPAddress.IsLoopback(address) || address.Equals(IPAddress.Any) || address.Equals(IPAddress.Broadcast))
@@ -145,7 +168,7 @@ namespace ADWorkstationMaintenance {
     foreach(UnicastIPAddressInformation local in adapter.GetIPProperties().UnicastAddresses)
      if(local.Address.Equals(address)) throw new ArgumentException("The executing computer cannot be restarted.");
    string application=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),"shutdown.exe");
-   string arguments=BuildArguments(address.ToString(),message,delay);
+   string arguments=cancel ? BuildCancelArguments(address.ToString()) : BuildArguments(address.ToString(),message,delay);
    if(password==null) {
     ProcessStartInfo start=new ProcessStartInfo(application,arguments);
     start.UseShellExecute=false; start.CreateNoWindow=true; start.RedirectStandardOutput=true; start.RedirectStandardError=true;
@@ -192,24 +215,29 @@ namespace ADWorkstationMaintenance {
 }
 
 function Invoke-NativeRestart {
-    param([string]$Address,[string]$Message,[int]$DelaySeconds,[int]$RequestTimeoutSeconds,[pscredential]$Credential)
+    param([string]$Address,[string]$Message,[int]$DelaySeconds,[int]$RequestTimeoutSeconds,[pscredential]$Credential,[switch]$Cancel)
     $account=$null;$domain=$null;$password=$null
     if($null -ne $Credential) {
         $account=$Credential.UserName;$password=$Credential.Password
         if($account.Contains('\')){$domain,$account=$account.Split('\',2)}
         elseif(-not $account.Contains('@')){$domain=[Environment]::UserDomainName}
     }
-    try{[ADWorkstationMaintenance.NativeShutdown]::Run($Address,$Message,[uint32]$DelaySeconds,$RequestTimeoutSeconds,$account,$domain,$password)}
+    try {
+        if($Cancel){[ADWorkstationMaintenance.RebootNativeV2]::Cancel($Address,$RequestTimeoutSeconds,$account,$domain,$password)}
+        else{[ADWorkstationMaintenance.RebootNativeV2]::Run($Address,$Message,[uint32]$DelaySeconds,$RequestTimeoutSeconds,$account,$domain,$password)}
+    }
     catch {
         $exception=$_.Exception
         while($null -ne $exception.InnerException){$exception=$exception.InnerException}
         if($exception -is [TimeoutException]){return [pscustomobject]@{Status='RequestTimedOut';Detail=$exception.Message}}
         if($exception -is [ComponentModel.Win32Exception]) {
-            if($exception.NativeErrorCode -eq 1115){return [pscustomobject]@{Status='RestartAlreadyPending';Detail='Windows reports a restart is already pending; it was not replaced.'}}
+            if($Cancel -and $exception.NativeErrorCode -eq 1116){return [pscustomobject]@{Status='NoRestartPending';Detail='Windows reports no pending shutdown to cancel.'}}
+            if(-not $Cancel -and $exception.NativeErrorCode -eq 1115){return [pscustomobject]@{Status='RestartAlreadyPending';Detail='Windows reports a restart is already pending; it was not replaced.'}}
             throw ('Shutdown request failed with error {0}: {1}' -f $exception.NativeErrorCode,$exception.Message)
         }
         throw
     }
+    if($Cancel){return [pscustomobject]@{Status='RestartCancelled';Detail=('shutdown.exe accepted cancellation of the pending shutdown on {0}.' -f $Address)}}
     return [pscustomobject]@{Status='RestartRequested';Detail=('shutdown.exe accepted the request for {0}; countdown {1} seconds. Physical reboot is not verified.' -f $Address,$DelaySeconds)}
 }
 
@@ -240,10 +268,10 @@ function Invoke-ComputerMaintenanceTask {
     catch{return [pscustomobject]@{Status='DNSFailed';Detail=$_.Exception.Message;Address=''}}
     if($Settings.Operation -eq 'Inventory'){return [pscustomobject]@{Status='Ready';Detail='DNS and local-address checks passed.';Address=$ipv4}}
     try {
-        $outcome=Invoke-NativeRestart -Address $ipv4 -Message $Settings.RestartMessage -DelaySeconds $Settings.RestartDelaySeconds -RequestTimeoutSeconds $Settings.RequestTimeoutSeconds -Credential $Settings.Credential
+        $outcome=Invoke-NativeRestart -Address $ipv4 -Message $Settings.RestartMessage -DelaySeconds $Settings.RestartDelaySeconds -RequestTimeoutSeconds $Settings.RequestTimeoutSeconds -Credential $Settings.Credential -Cancel:($Settings.Operation -eq 'CancelRestart')
         return [pscustomobject]@{Status=$outcome.Status;Detail=$outcome.Detail;Address=$ipv4}
     }
-    catch{return [pscustomobject]@{Status='RestartFailed';Detail=$_.Exception.Message;Address=$ipv4}}
+    catch{$status='RestartFailed';if($Settings.Operation -eq 'CancelRestart'){$status='CancellationFailed'};return [pscustomobject]@{Status=$status;Detail=$_.Exception.Message;Address=$ipv4}}
 }
 
 function Invoke-MaintenanceParallel {
@@ -295,25 +323,43 @@ function Invoke-MaintenanceParallel {
 }
 Set-StrictMode -Version 2.0
 $ErrorActionPreference='Stop'
-function Read-YesNo([string]$Prompt) {
-    while($true){$answer=Read-Host ($Prompt+' [y/N]');if([string]::IsNullOrWhiteSpace($answer)){return $false};switch($answer.Trim().ToLowerInvariant()){'y'{return $true};'yes'{return $true};'n'{return $false};'no'{return $false};default{Write-Host 'Enter Y or N.'}}}
+function Read-YesNo([string]$Prompt,[bool]$Default=$false) {
+    $suffix=' [y/N]';if($Default){$suffix=' [Y/n]'}
+    while($true){$answer=Read-Host ($Prompt+$suffix);if([string]::IsNullOrWhiteSpace($answer)){return $Default};switch($answer.Trim().ToLowerInvariant()){'y'{return $true};'yes'{return $true};'n'{return $false};'no'{return $false};default{Write-Host 'Enter Y or N.'}}}
 }
+function Show-ServerWarningPopup([string]$Message) {
+    if(-not [Environment]::UserInteractive){Write-Warning $Message;return}
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        [void][Windows.Forms.MessageBox]::Show($Message,'Workstation reboot warning',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Warning)
+    }
+    catch{Write-Warning $Message}
+}
+function Show-StartupServerWarning {
+    try{$productType=[int](Get-CimInstance -ClassName Win32_OperatingSystem -Property ProductType -ErrorAction Stop).ProductType}
+    catch{Write-Warning 'The local OS could not be identified. Use an authorized management server with access to the target subnets.';return}
+    if($productType -eq 1) {
+        Show-ServerWarningPopup 'This script is running on a workstation OS, not a server. Reboot and cancellation requests may fail across subnets from this computer. An authorized management server with network access to the client subnets is recommended. Running on a server does not bypass firewall or routing restrictions.'
+    }
+}
+Show-StartupServerWarning
 $interactive=-not $PSBoundParameters.ContainsKey('Action')
 if($interactive) {
-    Write-Host 'AD Workstation Maintenance — forced reboots'
+    Write-Host 'AD Workstation Reboot Management'
     Write-Host '  1. Preview eligible computers (default)'
     Write-Host '  2. Force reboot computers'
+    Write-Host '  3. Cancel pending reboot'
     Write-Host '  0. Exit'
     while([string]::IsNullOrWhiteSpace($Action)) {
         $choice=Read-Host 'Choose an operation [1]';if([string]::IsNullOrWhiteSpace($choice)){$choice='1'}
-        switch($choice.Trim()){'0'{return};'1'{$Action='Preview'};'2'{$Action='Restart'};default{Write-Host 'Enter 0, 1 or 2.'}}
+        switch($choice.Trim()){'0'{return};'1'{$Action='Preview'};'2'{$Action='Restart'};'3'{$Action='CancelRestart'};default{Write-Host 'Enter 0, 1, 2 or 3.'}}
     }
     if(-not $PSBoundParameters.ContainsKey('ComputerName')){$names=Read-Host 'Only these computers (comma separated; Enter for all matching AD computers)';if(-not [string]::IsNullOrWhiteSpace($names)){$ComputerName=@($names)}}
     $extra=Read-Host 'Additional computers to exempt (comma separated; Enter for none)'
     if(-not [string]::IsNullOrWhiteSpace($extra)){$ExcludeComputer=@($ExcludeComputer)+@($extra)}
-    if($Action -eq 'Restart' -and $null -eq $Credential -and (Read-YesNo 'Supply remote credentials? AD uses the launch identity.')) {
+    if($Action -in @('Restart','CancelRestart') -and $null -eq $Credential -and (Read-YesNo 'Supply alternate remote credentials? AD uses the launch identity.' $true)) {
         $Credential=Get-Credential -Message 'Enter the remote shutdown account (DOMAIN\username or user@domain).'
-        if($null -eq $Credential){throw 'Credential entry was cancelled. No restart was requested.'}
+        if($null -eq $Credential){throw 'Credential entry was cancelled. No remote request was sent.'}
     }
     if($Action -eq 'Restart' -and -not $PSBoundParameters.ContainsKey('RestartDelaySeconds')) {
         while($true){$delay=Read-Host 'Countdown in seconds; 0 is immediate [300]';if([string]::IsNullOrWhiteSpace($delay)){$RestartDelaySeconds=300;break};$parsed=0;if([int]::TryParse($delay,[ref]$parsed) -and $parsed -ge 0 -and $parsed -le 86400){$RestartDelaySeconds=$parsed;break};Write-Host 'Enter a number from 0 through 86400.'}
@@ -365,7 +411,8 @@ $logAbsolute=$ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPS
 if([IO.Path]::GetExtension($logAbsolute) -ine '.csv'){throw 'LogPath must end in .csv.'}
 $stream=[IO.File]::Open($logAbsolute,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read);$writer=$null
 function Write-RestartLog([object]$Entry,[string]$Status,[string]$Detail,[string]$Address='') {
-    $row=[pscustomobject][ordered]@{TimestampUtc=[datetime]::UtcNow.ToString('o');ComputerName=$Entry.Computer.Name;Target=$Entry.Target;IPv4=$Address;Action=$Action;CountdownSeconds=$RestartDelaySeconds;Status=$Status;Detail=$Detail}
+    $countdown='';if($Action -eq 'Restart'){$countdown=$RestartDelaySeconds}
+    $row=[pscustomobject][ordered]@{TimestampUtc=[datetime]::UtcNow.ToString('o');ComputerName=$Entry.Computer.Name;Target=$Entry.Target;IPv4=$Address;Action=$Action;CountdownSeconds=$countdown;Status=$Status;Detail=$Detail}
     $writer.WriteLine(($row|ConvertTo-Csv -NoTypeInformation)[1]);$writer.Flush();Write-Host ('{0}: {1}' -f $Entry.Computer.Name,$Status)
 }
 $candidates=[Collections.Generic.List[object]]::new();$eligible=[Collections.Generic.List[object]]::new();$seen=New-NameSet @();$requested=0;$failed=0
@@ -390,25 +437,29 @@ try {
         elseif($reply.Status -eq 'Ready'){$eligible.Add($entry);$status='Eligible';if($Action -eq 'Preview'){$status='EligiblePreview'};Write-RestartLog $entry $status $reply.Detail $reply.Address}
         else{Write-RestartLog $entry $reply.Status $reply.Detail $reply.Address}
     }
-    Write-Host ('Eligible: {0}. Countdown: {1} seconds. Forced restarts may discard unsaved work.' -f $eligible.Count,$RestartDelaySeconds)
+    Write-Host ('Operation: {0}. Eligible: {1}.' -f $Action,$eligible.Count)
+    if($Action -eq 'Restart'){Write-Host ('Countdown: {0} seconds. Forced restarts may discard unsaved work.' -f $RestartDelaySeconds)}
     if($eligible.Count -gt 0){$eligible|Sort-Object {$_.Computer.Name}|ForEach-Object{[pscustomobject]@{ComputerName=$_.Computer.Name;Target=$_.Target}}|Format-Table -AutoSize|Out-Host}
     $approved=$false
-    if($Action -eq 'Restart' -and $eligible.Count -gt 0) {
+    if($Action -in @('Restart','CancelRestart') -and $eligible.Count -gt 0) {
         $cancelled=$false
-        if($interactive -and -not $WhatIfPreference){$answer=Read-Host 'Type RUN to force reboot every listed computer; Enter cancels';$cancelled=($null -eq $answer -or $answer.Trim() -ine 'RUN');if(-not $cancelled -and -not $PSBoundParameters.ContainsKey('Confirm')){$ConfirmPreference='None'}}
-        if(-not $cancelled){$approved=$PSCmdlet.ShouldProcess(($eligible.Count.ToString()+' listed workstations'),('Dispatch parallel shutdown.exe /r /f requests with '+$RestartDelaySeconds+' second countdown'))}
+        $description='force reboot every listed computer'
+        $dispatchDescription='Dispatch parallel shutdown.exe /r /f requests with '+$RestartDelaySeconds+' second countdown'
+        if($Action -eq 'CancelRestart'){$description='cancel any pending reboot on every listed computer';$dispatchDescription='Dispatch parallel shutdown.exe /a cancellation requests'}
+        if($interactive -and -not $WhatIfPreference){$cancelled=-not (Read-YesNo ('Are you SURE you want to '+$description+'?') $false);if(-not $cancelled -and -not $PSBoundParameters.ContainsKey('Confirm')){$ConfirmPreference='None'}}
+        if(-not $cancelled){$approved=$PSCmdlet.ShouldProcess(($eligible.Count.ToString()+' listed workstations'),$dispatchDescription)}
         if(-not $approved){$status='Declined';if($cancelled){$status='Cancelled'};if($WhatIfPreference){$status='WhatIf'};foreach($entry in $eligible){Write-RestartLog $entry $status 'No restart request was sent.'}}
     }
     if($approved) {
-        Initialize-NativeShutdown;$settings.Operation='Restart'
-        Write-Host 'Dispatching parallel shutdown.exe requests; reboot completion is not awaited.'
+        Initialize-NativeShutdown;$settings.Operation=$Action
+        Write-Host ('Dispatching parallel shutdown.exe requests: '+$Action+'.')
         Invoke-MaintenanceParallel -Items $eligible.ToArray() -Context $settings @parallel|ForEach-Object {
             $entry=$_.Item;$reply=$_.Result
             if($_.Error -ne ''){$failed++;Write-RestartLog $entry 'DispatchFailed' ($_.Error+' Request outcome is uncertain; inspect the target before retrying.')}
-            else{Write-RestartLog $entry $reply.Status $reply.Detail $reply.Address;if($reply.Status -in @('RestartRequested','RestartAlreadyPending')){$requested++}elseif($reply.Status -in @('RestartFailed','RequestTimedOut','DNSFailed')){$failed++}}
+            else{Write-RestartLog $entry $reply.Status $reply.Detail $reply.Address;if($reply.Status -in @('RestartRequested','RestartAlreadyPending','RestartCancelled','NoRestartPending')){$requested++}elseif($reply.Status -in @('RestartFailed','CancellationFailed','RequestTimedOut','DNSFailed')){$failed++}}
         }
     }
 }
 finally{if($null -ne $writer){$writer.Dispose()};$stream.Dispose()}
-Write-Host ('Finished dispatch: {0} accepted/already pending; {1} failed or uncertain. Log: {2}' -f $requested,$failed,$logAbsolute)
+Write-Host ('Finished dispatch: {0} requests completed; {1} failed or uncertain. Log: {2}' -f $requested,$failed,$logAbsolute)
 if($Action -eq 'Preview'){Write-Host 'Preview only. No reboot requests were sent.'}
